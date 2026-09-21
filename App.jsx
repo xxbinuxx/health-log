@@ -1816,8 +1816,9 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
           <h2 style={{ color: "var(--run)" }}>Not saving</h2>
           <div className="body">
             <p className="note">
-              The app could not write to the database. Usually this means the Supabase codes in config.js are
-              wrong, or the hl_store table was not created (step 3 of SETUP.md). Nothing you log will stick until this clears.
+              The app could not write to the database, so nothing you log will stick until this clears.
+              {store.lastError ? <><br /><b style={{ color: "var(--run)" }}>Reason: {store.lastError}</b></> : ""}
+              <br />Usually the fix is re-running supabase.sql in the Supabase SQL Editor (SETUP.md step 3.4), or re-copying the two codes into config.js (step 4).
             </p>
           </div>
         </div>

@@ -58,7 +58,7 @@ const KIND_META = {
   alcohol: { color: "var(--alc)", name: "Alcohol", hex: "#7A4A78" },
   cannabis: { color: "var(--thc)", name: "Cannabis", hex: "#3F7A63" },
   nicotine: { color: "var(--nic)", name: "Nicotine", hex: "#5E7285" },
-  stimulant: { color: "var(--stim)", name: "Stimulant", hex: "#A8473F" },
+  stimulant: { color: "var(--stim)", name: "Adderall", hex: "#A8473F" },
 };
 const KIND_ORDER = ["caffeine", "alcohol", "cannabis", "nicotine", "stimulant"];
 
@@ -76,6 +76,7 @@ const KM_PER_MI = 1.609344;
 const toUnit = (km, u) => (u === "mi" ? km / KM_PER_MI : km);
 const fromUnit = (v, u) => (u === "mi" ? v * KM_PER_MI : v);
 const round = (n, d = 1) => (n == null || isNaN(n) ? null : Math.round(n * 10 ** d) / 10 ** d);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
 const sum = (arr) => arr.reduce((a, b) => a + b, 0);
 const numOf = (v) => {
@@ -417,7 +418,7 @@ const CSS = `
 .hl .panel .body{padding:14px;}
 .hl .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
 .hl .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
-.hl .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+.hl .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;row-gap:18px;}
 @media(max-width:820px){.hl .grid4{grid-template-columns:repeat(2,1fr);}}
 @media(max-width:760px){.hl .grid2,.hl .grid3{grid-template-columns:1fr;}}
 .hl .stat{display:flex;flex-direction:column;gap:1px;}
@@ -490,6 +491,9 @@ const CSS = `
 .hl .saved{font-size:11.5px;color:var(--lift);}
 .hl .tag.stim{background:var(--stim);}
 .hl .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--rule-soft);color:var(--soft);}
+.hl .rangebar{display:flex;justify-content:flex-end;margin:-6px 0 14px;}
+.hl .rangebar .seg button{padding:5px 12px;font-size:12.5px;}
+@media(max-width:600px){.hl .rangebar{justify-content:stretch;} .hl .rangebar .seg{display:flex;width:100%;} .hl .rangebar .seg button{flex:1;padding:6px 4px;}}
 .hl .rc-tip{background:#fff;border:1px solid var(--rule);padding:6px 9px;font-size:12px;color:var(--ink);}
 .hl .rc-tip b{display:block;color:var(--soft);font-weight:500;margin-bottom:2px;}
 @media (prefers-reduced-motion:reduce){.hl *{transition:none!important;}}
@@ -533,15 +537,6 @@ function Chart({ h = 180, children }) {
   return <div style={{ width: "100%", height: h }}><ResponsiveContainer>{children}</ResponsiveContainer></div>;
 }
 
-function RangeToggle({ value, onChange, options }) {
-  return (
-    <span className="seg" style={{ fontSize: 12 }}>
-      {options.map((o) => (
-        <button key={o} aria-pressed={value === o} onClick={() => onChange(o)} style={{ padding: "3px 10px", fontSize: 12 }}>{o}d</button>
-      ))}
-    </span>
-  );
-}
 
 /* ================================================================== */
 /* Log — the one-sheeter                                              */
@@ -934,29 +929,31 @@ function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDos
 function useDaily({ doses, sleep, sessions, days = [], settings }) {
   return useMemo(() => {
     const byDay = new Map();
-    const day = (k) => {
-      if (!byDay.has(k)) byDay.set(k, { date: k, sleep: null, sessions: [], caf: 0, alc: 0, thc: 0, nic: 0, stim: 0, entries: [], tags: [], note: "", steps: null });
-      return byDay.get(k);
-    };
+    const blank = (k) => ({ date: k, sleep: null, sessions: [], caf: 0, cafCount: 0, alc: 0, thc: 0, thcMg: 0, thcSessions: 0, nic: 0, nicMg: 0, stim: 0, stimMg: 0, entries: [], tags: [], note: "", steps: null });
+    const day = (k) => { if (!byDay.has(k)) byDay.set(k, blank(k)); return byDay.get(k); };
     for (const s of sleep) if (s.score != null || s.asleepMin != null || s.restingHr != null || s.bodyBattery != null || s.bedtime) day(s.date).sleep = s;
     for (const d of days) { const x = day(d.date); x.tags = d.tags || []; x.note = d.note || ""; x.steps = d.steps ?? null; }
     for (const s of sessions) day(s.date).sessions.push(s);
     for (const d of doses) {
       const k = dayKeyFor(d.ts, settings.dayStartHour); const x = day(k);
       x.entries.push(d);
-      if (d.kind === "caffeine") x.caf += d.amount;
+      if (d.kind === "caffeine") { x.caf += d.amount; x.cafCount += 1; }
       else if (d.kind === "alcohol") x.alc += d.amount;
-      else if (d.kind === "cannabis") x.thc += 1;
-      else if (d.kind === "nicotine") x.nic += 1;
-      else if (d.kind === "stimulant") x.stim += d.amount;
+      else if (d.kind === "cannabis") { x.thc += 1; if (d.unit === "mg") x.thcMg += d.amount; else x.thcSessions += d.amount; }
+      else if (d.kind === "nicotine") { x.nic += 1; x.nicMg += d.unit === "mg" ? d.amount : 6 * d.amount; }
+      else if (d.kind === "stimulant") { x.stim += d.amount; x.stimMg += d.amount; }
     }
     for (const x of byDay.values()) {
-      x.runKm = sum(x.sessions.filter((s) => s.kind === "run").map((s) => s.distanceKm || 0));
-      x.hasRun = x.sessions.some((s) => s.kind === "run");
+      const runs = x.sessions.filter((s) => s.kind === "run");
+      x.runKm = sum(runs.map((s) => s.distanceKm || 0));
+      x.hasRun = runs.length > 0;
       x.hasLift = x.sessions.some((s) => s.kind === "lift");
       x.isRest = !x.hasRun && !x.hasLift && x.sessions.some((s) => s.kind === "rest");
+      // distance-weighted pace for the day, seconds per km
+      const paced = runs.map((s) => ({ p: paceSecOf(s, "km"), d: s.distanceKm || 0 })).filter((r) => r.p);
+      x.paceSecKm = paced.length ? (paced.every((r) => r.d) ? sum(paced.map((r) => r.p * r.d)) / sum(paced.map((r) => r.d)) : avg(paced.map((r) => r.p))) : null;
     }
-    const get = (k) => byDay.get(k) || { date: k, sleep: null, sessions: [], caf: 0, alc: 0, thc: 0, nic: 0, stim: 0, entries: [], tags: [], note: "", steps: null, runKm: 0, hasRun: false, hasLift: false, isRest: false };
+    const get = (k) => byDay.get(k) || { ...blank(k), runKm: 0, hasRun: false, hasLift: false, isRest: false, paceSecKm: null };
     return { byDay, get };
   }, [doses, sleep, sessions, days, settings.dayStartHour]);
 }
@@ -966,21 +963,124 @@ function daysSince(doses, kind) {
   return t ? Math.floor((Date.now() - t) / 864e5) : null;
 }
 
-function weekBuckets(n, endKey) {
-  const thisMon = mondayOf(endKey);
-  const out = [];
-  for (let i = n - 1; i >= 0; i--) out.push(addDays(thisMon, -7 * i));
-  return out;
+/* ---- the three indices --------------------------------------------- */
+
+// yesterday counts half, then it fades: 5/10, 3/10, 1.5/10, 0.5/10
+const LAG_W = [0.5, 0.3, 0.15, 0.05];
+
+// Regen: how well you have been sleeping. Garmin's score, or hours against your goal if there's no score.
+function regenRaw(x, settings) {
+  const s = x.sleep;
+  if (!s) return null;
+  if (s.score != null) return clamp(s.score, 0, 100);
+  if (s.asleepMin != null) return clamp((s.asleepMin / 60 / settings.sleepHoursGoal) * 85, 0, 100);
+  return null;
+}
+
+// Run Readiness: distance and pace. A run of a quarter of your weekly target scores 100 on distance;
+// pace is judged against your own 90-day median, ten percent faster is full marks.
+function runRaw(x, medianPaceKm, settings) {
+  if (!x.hasRun) return 0;
+  const u = settings.distanceUnit;
+  const perRun = (settings.weeklyDistanceTarget || 40) / 4;
+  const distScore = clamp((100 * toUnit(x.runKm, u)) / perRun, 0, 120);
+  if (x.paceSecKm && medianPaceKm) {
+    const rel = (medianPaceKm - x.paceSecKm) / medianPaceKm;       // positive = faster than usual
+    const paceScore = clamp(50 + rel * 500, 0, 100);
+    return clamp(0.65 * distScore + 0.35 * paceScore, 0, 100);
+  }
+  return clamp(distScore, 0, 100);
+}
+
+// Degen: how much you have been putting in. Big nights count for far more than the sum of their parts.
+function degenRaw(x) {
+  const drinks = x.alc || 0, thc = x.thcMg || 0, sess = x.thcSessions || 0, nic = x.nicMg || 0, stim = x.stimMg || 0, cof = x.cafCount || 0;
+  let s = 4 * cof + 6 * drinks + 3 * thc + 8 * sess + 1 * nic + 3 * stim;
+  const heavyDrink = drinks > 4.5;
+  const heavyWeed = thc > 5 || sess >= 2;
+  if (heavyDrink) s += 40 + 10 * (drinks - 4.5);
+  if (heavyWeed) s += 30 + 3 * Math.max(0, thc - 5);
+  if (heavyDrink && heavyWeed) s *= 1.25;
+  return clamp(s, 0, 100);
+}
+
+// Rolling value for a day: the four days before it, weighted. Missing sleep is skipped and the weights
+// renormalised; a day with no run or no intake logged counts as zero, because that is what it was.
+function lagged(rawByDate, dayKey, missingAsZero) {
+  let num = 0, den = 0;
+  LAG_W.forEach((w, i) => {
+    const v = rawByDate.get(addDays(dayKey, -(i + 1)));
+    if (v == null) { if (missingAsZero) den += w; return; }
+    num += v * w; den += w;
+  });
+  return den ? num / den : null;
+}
+
+function buildIndices(daily, dayKeys, settings) {
+  const first = dayKeys[0];
+  const ext = [...lastNDays(4, addDays(first, -1)), ...dayKeys];
+  const recent = lastNDays(90, dayKeys[dayKeys.length - 1]).map((k) => daily.get(k).paceSecKm).filter(Boolean);
+  const medianPaceKm = recent.length ? median(recent) : null;
+
+  const regen = new Map(), run = new Map(), degen = new Map();
+  for (const k of ext) {
+    const x = daily.get(k);
+    regen.set(k, regenRaw(x, settings));
+    run.set(k, runRaw(x, medianPaceKm, settings));
+    degen.set(k, degenRaw(x));
+  }
+  return dayKeys.map((k) => ({
+    date: k, label: fmtShort(k),
+    regen: round(lagged(regen, k, false), 1),
+    run: round(lagged(run, k, true), 1),
+    degen: round(lagged(degen, k, true), 1),
+  }));
+}
+
+/* ---- global range + buckets ---------------------------------------- */
+
+const RANGES = [[7, "Week"], [30, "30 days"], [180, "180 days"], [365, "Year"], [1825, "5 years"]];
+
+// days when short, weeks in the middle, months when long
+function bucketize(dayKeys, range) {
+  if (range <= 31) return dayKeys.map((k) => ({ key: k, label: fmtShort(k), days: [k] }));
+  const m = new Map();
+  if (range <= 400) {
+    for (const k of dayKeys) { const w = mondayOf(k); if (!m.has(w)) m.set(w, []); m.get(w).push(k); }
+    return [...m.entries()].map(([w, ds]) => ({ key: w, label: fmtShort(w), days: ds }));
+  }
+  for (const k of dayKeys) { const mo = k.slice(0, 7); if (!m.has(mo)) m.set(mo, []); m.get(mo).push(k); }
+  return [...m.entries()].map(([mo, ds]) => ({
+    key: mo, days: ds,
+    label: fromDayKey(`${mo}-01`).toLocaleDateString(undefined, { month: "short", year: "2-digit" }),
+  }));
+}
+const bucketNoun = (range) => (range <= 31 ? "day" : range <= 400 ? "week" : "month");
+const bucketAvg = (b, f) => { const v = b.days.map(f).filter((x) => x != null); return v.length ? avg(v) : null; };
+const bucketSum = (b, f) => sum(b.days.map((k) => f(k) || 0));
+const tickGap = (n) => Math.max(0, Math.ceil(n / 9) - 1);
+
+function RangeBar({ value, onChange }) {
+  return (
+    <div className="rangebar">
+      <span className="seg">
+        {RANGES.map(([d, name]) => (
+          <button key={d} aria-pressed={value === d} onClick={() => onChange(d)}>{name}</button>
+        ))}
+      </span>
+    </div>
+  );
 }
 
 /* ================================================================== */
 /* Overview                                                           */
 /* ================================================================== */
 
-function Overview({ doses, sleep, sessions, days, settings, goLog }) {
+function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
   const daily = useDaily({ doses, sleep, sessions, days, settings });
   const today = toDayKey(new Date());
   const d7 = lastNDays(7, today), d30 = lastNDays(30, today), d14 = lastNDays(14, today);
+  const span = lastNDays(range, today);
   const u = settings.distanceUnit;
 
   const sl = (keys) => keys.map((k) => daily.get(k).sleep).filter(Boolean);
@@ -1010,19 +1110,24 @@ function Overview({ doses, sleep, sessions, days, settings, goLog }) {
   for (let i = 0; i < 60; i++) {
     const x = daily.get(addDays(today, -i));
     if (x.hasRun || x.hasLift) streak++;
-    else if (i === 0) continue; // today may not be logged yet
+    else if (i === 0) continue;
     else break;
   }
 
-  const trend = d30.map((k) => {
-    const x = daily.get(k);
-    return { k, label: fmtShort(k), score: x.sleep?.score ?? null, run: x.runKm ? round(toUnit(x.runKm, u), 1) : 0, lift: x.hasLift ? 1 : 0 };
-  });
+  // sleep score against training load, at the range's grain
+  const buckets = bucketize(span, range);
+  const trend = buckets.map((b) => ({
+    label: b.label,
+    score: round(bucketAvg(b, (k) => daily.get(k).sleep?.score ?? null), 0),
+    run: round(toUnit(bucketSum(b, (k) => daily.get(k).runKm), u), 1),
+  }));
 
   const gap = (a, b) => (a != null && b != null ? `${a >= b ? "+" : ""}${round(a - b, 1)} vs 30d` : "30d avg —");
 
   return (
     <>
+      <IndexPanel daily={daily} settings={settings} range={range} />
+
       <div className="panel">
         <h2>Last 7 days <span className="hint">{logged30} of the last 30 days have something logged</span></h2>
         <div className="body">
@@ -1066,7 +1171,7 @@ function Overview({ doses, sleep, sessions, days, settings, goLog }) {
                     sub={cafAvg30 != null ? `${Math.round(cafAvg30)} over 30d` : ""}
                     bar={{ pct: ((cafAvg7 ?? 0) / settings.caffeineLimitMg) * 100, color: (cafAvg7 ?? 0) > settings.caffeineLimitMg ? HEX.alert : KIND_META.caffeine.hex }} />
               <Stat v={round(wkDrinks, 1) ?? 0} l={`drinks of ${settings.drinksWeeklyLimit}`} color={KIND_META.alcohol.hex}
-                    sub={[["alcohol", "drink"], ["cannabis", "cannabis"], ["nicotine", "nicotine"]]
+                    sub={[["alcohol", "drink"], ["cannabis", "cannabis"], ["nicotine", "nicotine"], ["stimulant", "adderall"]]
                       .map(([k, n]) => { const d = daysSince(doses, k); return d != null ? `${d}d since ${n}` : null; })
                       .filter(Boolean).join(" · ")}
                     bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.alert : KIND_META.alcohol.hex }} />
@@ -1078,15 +1183,15 @@ function Overview({ doses, sleep, sessions, days, settings, goLog }) {
       <FortnightStrip days={d14} daily={daily} settings={settings} onPick={goLog} />
 
       <div className="panel">
-        <h2>Thirty days <span className="hint">sleep score against training load</span></h2>
+        <h2>Sleep against training load <span className="hint">per {bucketNoun(range)}</span></h2>
         <div className="body" style={{ paddingTop: 8 }}>
           <Chart h={210}>
             <ComposedChart data={trend} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={4} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
+              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(trend.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
               <YAxis yAxisId="score" domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
               <YAxis yAxisId="run" orientation="right" tick={axisStyle} tickLine={false} axisLine={false} />
-              <Tooltip content={<Tip fmt={(p) => p.dataKey === "run" ? `${p.value} ${u}` : p.dataKey === "lift" ? (p.value ? "yes" : "no") : p.value} />} />
+              <Tooltip content={<Tip fmt={(p) => p.dataKey === "run" ? `${p.value} ${u}` : p.value} />} />
               <Bar yAxisId="run" dataKey="run" name="Run" fill={HEX.run} opacity={0.75} radius={[2, 2, 0, 0]} />
               <Line yAxisId="score" type="monotone" dataKey="score" name="Sleep score" stroke={HEX.sleep} strokeWidth={2} dot={{ r: 2.5 }} connectNulls />
             </ComposedChart>
@@ -1098,8 +1203,60 @@ function Overview({ doses, sleep, sessions, days, settings, goLog }) {
         </div>
       </div>
 
-      <Ledger days={d30} daily={daily} settings={settings} onPick={goLog} />
+      <Ledger days={lastNDays(Math.min(range, 60), today)} daily={daily} settings={settings} onPick={goLog} />
     </>
+  );
+}
+
+/* Regen, Run Readiness, Degen: today's reading and the trend over the selected range */
+function IndexPanel({ daily, settings, range }) {
+  const today = toDayKey(new Date());
+  const span = lastNDays(range, today);
+  const rows = useMemo(() => buildIndices(daily, span, settings), [daily, settings, range]);
+  const now = rows[rows.length - 1];
+  const buckets = bucketize(span, range);
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+  const data = buckets.map((b) => ({
+    label: b.label,
+    regen: round(bucketAvg(b, (k) => byDate.get(k)?.regen ?? null), 1),
+    run: round(bucketAvg(b, (k) => byDate.get(k)?.run ?? null), 1),
+    degen: round(bucketAvg(b, (k) => byDate.get(k)?.degen ?? null), 1),
+  }));
+  const C = { regen: HEX.sleep, run: HEX.run, degen: HEX.alert };
+  const word = (v, good) => (v == null ? "no data yet" : good
+    ? v >= 80 ? "strong" : v >= 65 ? "solid" : v >= 50 ? "middling" : "low"
+    : v >= 60 ? "heavy" : v >= 35 ? "elevated" : v >= 15 ? "moderate" : "light");
+
+  return (
+    <div className="panel">
+      <h2>How things stand <span className="hint">each score weighs the last four days: yesterday half, then fading</span></h2>
+      <div className="body">
+        <div className="grid3" style={{ gap: 12, marginBottom: 12 }}>
+          <Stat v={now?.regen != null ? Math.round(now.regen) : null} l="Regen Score" color={C.regen}
+                sub={`sleep is ${word(now?.regen, true)}`} bar={now?.regen != null ? { pct: now.regen, color: C.regen } : null} />
+          <Stat v={now?.run != null ? Math.round(now.run) : null} l="Run Readiness" color={C.run}
+                sub={`recent running is ${word(now?.run, true)}`} bar={now?.run != null ? { pct: now.run, color: C.run } : null} />
+          <Stat v={now?.degen != null ? Math.round(now.degen) : null} l="Degen Score" color={C.degen}
+                sub={`intake has been ${word(now?.degen, false)}`} bar={now?.degen != null ? { pct: now.degen, color: C.degen } : null} />
+        </div>
+        <Chart h={230}>
+          <LineChart data={data} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+            <CartesianGrid stroke={gridStroke} vertical={false} />
+            <XAxis dataKey="label" tick={axisStyle} interval={tickGap(data.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+            <YAxis domain={[0, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
+            <Tooltip content={<Tip />} />
+            <Line type="monotone" dataKey="regen" name="Regen" stroke={C.regen} strokeWidth={2.2} dot={false} connectNulls />
+            <Line type="monotone" dataKey="run" name="Run Readiness" stroke={C.run} strokeWidth={2.2} dot={false} connectNulls />
+            <Line type="monotone" dataKey="degen" name="Degen" stroke={C.degen} strokeWidth={2.2} dot={false} connectNulls />
+          </LineChart>
+        </Chart>
+        <div className="legend">
+          <span><i style={{ background: C.regen }} />Regen: higher means better sleep</span>
+          <span><i style={{ background: C.run }} />Run Readiness: higher means more distance, faster pace</span>
+          <span><i style={{ background: C.degen }} />Degen: higher means more intake, with big nights counting extra</span>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1213,39 +1370,40 @@ function FortnightStrip({ days, daily, settings, onPick }) {
 /* Sleep                                                              */
 /* ================================================================== */
 
-function SleepDash({ doses, sleep, sessions, days: dayRecs, settings }) {
+function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
   const daily = useDaily({ doses, sleep, sessions, days: dayRecs, settings });
-  const [range, setRange] = useState(30);
   const today = toDayKey(new Date());
-  const days = lastNDays(range, today);
+  const span = lastNDays(range, today);
 
-  const rows = days.map((k) => {
+  const rows = span.map((k) => {
     const x = daily.get(k); const prev = daily.get(addDays(k, -1));
     return {
-      k, label: fmtShort(k),
-      score: x.sleep?.score ?? null,
+      k, score: x.sleep?.score ?? null,
       hours: x.sleep?.asleepMin != null ? round(x.sleep.asleepMin / 60, 2) : null,
-      rhr: x.sleep?.restingHr ?? null,
-      bb: x.sleep?.bodyBattery ?? null,
-      bed: bedtimeMins(x.sleep?.bedtime),
+      rhr: x.sleep?.restingHr ?? null, bb: x.sleep?.bodyBattery ?? null, bed: bedtimeMins(x.sleep?.bedtime),
       prevAlc: prev.alc, prevCaf: prev.caf, prevTrained: prev.hasRun || prev.hasLift, prevTags: prev.tags,
     };
   });
+  const byK = new Map(rows.map((r) => [r.k, r]));
+  const buckets = bucketize(span, range);
+  const chart = buckets.map((b) => ({
+    label: b.label,
+    score: round(bucketAvg(b, (k) => byK.get(k)?.score), 0),
+    hours: round(bucketAvg(b, (k) => byK.get(k)?.hours), 1),
+    rhr: round(bucketAvg(b, (k) => byK.get(k)?.rhr), 0),
+    bb: round(bucketAvg(b, (k) => byK.get(k)?.bb), 0),
+    bed: round(bucketAvg(b, (k) => byK.get(k)?.bed), 0),
+  }));
+
   const scored = rows.filter((r) => r.score != null);
   const scores = scored.map((r) => r.score);
   const hoursArr = rows.filter((r) => r.hours != null).map((r) => r.hours);
   const rhrArr = rows.filter((r) => r.rhr != null).map((r) => r.rhr);
   const bbArr = rows.filter((r) => r.bb != null).map((r) => r.bb);
   const bedArr = rows.filter((r) => r.bed != null).map((r) => r.bed);
-  const rBed = pearson(rows.filter((r) => r.bed != null && r.score != null).map((r) => r.bed), rows.filter((r) => r.bed != null && r.score != null).map((r) => r.score));
-  const tagRows = settings.dayTags.map((t) => {
-    const after = scored.filter((r) => r.prevTags.includes(t));
-    return { tag: t, score: after.length ? Math.round(avg(after.map((r) => r.score))) : null,
-      bb: after.filter((r) => r.bb != null).length ? Math.round(avg(after.filter((r) => r.bb != null).map((r) => r.bb))) : null, n: after.length };
-  }).filter((r) => r.n);
 
   const weekday = [1, 2, 3, 4, 5, 6, 0].map((dow) => {
-    const s = rows.filter((r) => r.score != null && fromDayKey(r.k).getDay() === dow).map((r) => r.score);
+    const s = scored.filter((r) => fromDayKey(r.k).getDay() === dow).map((r) => r.score);
     return { day: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow], score: s.length ? round(avg(s), 0) : null, n: s.length };
   });
 
@@ -1255,16 +1413,24 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings }) {
   const noTrain = scored.filter((r) => !r.prevTrained).map((r) => r.score);
   const rAlc = pearson(scored.map((r) => r.prevAlc), scores);
   const rCaf = pearson(scored.map((r) => r.prevCaf), scores);
-  const rRhr = pearson(scored.filter((r) => r.rhr != null).map((r) => r.rhr), scored.filter((r) => r.rhr != null).map((r) => r.score));
+  const withRhr = scored.filter((r) => r.rhr != null);
+  const rRhr = pearson(withRhr.map((r) => r.rhr), withRhr.map((r) => r.score));
+  const withBed = scored.filter((r) => r.bed != null);
+  const rBed = pearson(withBed.map((r) => r.bed), withBed.map((r) => r.score));
+  const tagRows = settings.dayTags.map((t) => {
+    const after = scored.filter((r) => r.prevTags.includes(t));
+    return { tag: t, score: after.length ? Math.round(avg(after.map((r) => r.score))) : null,
+      bb: after.filter((r) => r.bb != null).length ? Math.round(avg(after.filter((r) => r.bb != null).map((r) => r.bb))) : null, n: after.length };
+  }).filter((r) => r.n);
 
   const recent = [...sleep].filter((s) => s.score != null || s.asleepMin != null || s.bodyBattery != null).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 14);
-
   const rWord = (r) => (r == null ? "not enough nights yet" : Math.abs(r) < 0.2 ? "no real relationship" : Math.abs(r) < 0.5 ? "a weak link" : "a clear link");
+  const noun = bucketNoun(range);
 
   return (
     <>
       <div className="panel">
-        <h2>Sleep <RangeToggle value={range} onChange={setRange} options={[30, 90]} /></h2>
+        <h2>Sleep <span className="hint">last {range} days</span></h2>
         <div className="body">
           <div className="grid4" style={{ gap: 12 }}>
             <Stat v={scores.length ? Math.round(avg(scores)) : null} l="avg score" color={HEX.sleep}
@@ -1284,18 +1450,18 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings }) {
       </div>
 
       <div className="panel">
-        <h2>Score and hours</h2>
+        <h2>Score, body battery and hours <span className="hint">per {noun}</span></h2>
         <div className="body" style={{ paddingTop: 8 }}>
           <Chart h={220}>
-            <ComposedChart data={rows} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+            <ComposedChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={Math.max(2, Math.floor(range / 8))} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
+              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
               <YAxis yAxisId="score" domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
               <YAxis yAxisId="hours" orientation="right" domain={[0, 10]} tick={axisStyle} tickLine={false} axisLine={false} />
               <Tooltip content={<Tip />} />
               <ReferenceLine yAxisId="score" y={settings.sleepScoreGoal} stroke={HEX.sleep} strokeDasharray="3 4" opacity={0.6} />
               <Bar yAxisId="hours" dataKey="hours" name="Hours" fill={HEX.hours} opacity={0.35} radius={[2, 2, 0, 0]} />
-              <Line yAxisId="score" type="monotone" dataKey="score" name="Score" stroke={HEX.sleep} strokeWidth={2} dot={{ r: 2.5 }} connectNulls />
+              <Line yAxisId="score" type="monotone" dataKey="score" name="Score" stroke={HEX.sleep} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
               <Line yAxisId="score" type="monotone" dataKey="bb" name="Body battery" stroke={HEX.hours} strokeWidth={1.5} strokeDasharray="4 3" dot={false} connectNulls />
             </ComposedChart>
           </Chart>
@@ -1313,16 +1479,16 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings }) {
           <div className="body" style={{ paddingTop: 8 }}>
             {rhrArr.length ? (
               <Chart h={170}>
-                <LineChart data={rows} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+                <LineChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
                   <CartesianGrid stroke={gridStroke} vertical={false} />
-                  <XAxis dataKey="label" tick={axisStyle} interval={Math.max(2, Math.floor(range / 6))} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
+                  <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
                   <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={axisStyle} tickLine={false} axisLine={false} />
                   <Tooltip content={<Tip />} />
-                  <Line type="monotone" dataKey="rhr" name="RHR" stroke={HEX.rhr} strokeWidth={2} dot={{ r: 2.5 }} connectNulls />
+                  <Line type="monotone" dataKey="rhr" name="RHR" stroke={HEX.rhr} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
                 </LineChart>
               </Chart>
             ) : <p className="empty">Add resting HR on the Log tab and it will chart here.</p>}
-            {rRhr != null && <p className="note" style={{ marginTop: 6 }}>RHR against score: {rWord(rRhr)} (r = {round(rRhr, 2)}). A higher RHR on a lower-score night is the usual pattern.</p>}
+            {rRhr != null && <p className="note" style={{ marginTop: 6 }}>RHR against score: {rWord(rRhr)} (r = {round(rRhr, 2)}).</p>}
           </div>
         </div>
         <div className="panel">
@@ -1330,12 +1496,12 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings }) {
           <div className="body" style={{ paddingTop: 8 }}>
             {bedArr.length ? (
               <Chart h={170}>
-                <LineChart data={rows} margin={{ top: 6, right: 8, left: -10, bottom: 0 }}>
+                <LineChart data={chart} margin={{ top: 6, right: 8, left: -10, bottom: 0 }}>
                   <CartesianGrid stroke={gridStroke} vertical={false} />
-                  <XAxis dataKey="label" tick={axisStyle} interval={Math.max(2, Math.floor(range / 6))} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
+                  <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
                   <YAxis domain={["dataMin - 30", "dataMax + 30"]} tick={axisStyle} tickLine={false} axisLine={false} tickFormatter={(v) => fmtBedtime(v)} width={54} />
                   <Tooltip content={<Tip fmt={(p) => fmtBedtime(p.value)} />} />
-                  <Line type="monotone" dataKey="bed" name="Bedtime" stroke={HEX.sleep} strokeWidth={2} dot={{ r: 2.5 }} connectNulls />
+                  <Line type="monotone" dataKey="bed" name="Bedtime" stroke={HEX.sleep} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
                 </LineChart>
               </Chart>
             ) : <p className="empty">Add bedtime on the Log tab and it will chart here.</p>}
@@ -1348,7 +1514,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings }) {
             <Chart h={170}>
               <BarChart data={weekday} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
                 <CartesianGrid stroke={gridStroke} vertical={false} />
-                <XAxis dataKey="day" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
+                <XAxis dataKey="day" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
                 <YAxis domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
                 <Tooltip content={<Tip fmt={(p) => `${p.value} (${p.payload.n} nights)`} />} />
                 <Bar dataKey="score" name="Score" radius={[2, 2, 0, 0]}>
@@ -1382,7 +1548,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings }) {
             </table>
             <p className="note" style={{ marginTop: 10 }}>
               Drinks vs score: {rWord(rAlc)}{rAlc != null ? ` (r = ${round(rAlc, 2)})` : ""}. Caffeine vs score: {rWord(rCaf)}{rCaf != null ? ` (r = ${round(rCaf, 2)})` : ""}.
-              Small samples swing a lot; read this after a month or two of nights.
+              Small samples swing a lot; widen the range for steadier numbers.
             </p>
           </div>
         </div>
@@ -1417,21 +1583,27 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings }) {
 /* Training                                                           */
 /* ================================================================== */
 
-function TrainingDash({ sessions, days: dayRecs, settings, setSettings }) {
+function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSettings, range }) {
+  const daily = useDaily({ doses, sleep, sessions, days: dayRecs, settings });
   const today = toDayKey(new Date());
   const u = settings.distanceUnit;
-  const [range, setRange] = useState(30);
-  const days = new Set(lastNDays(range, today));
-  const inRange = sessions.filter((s) => days.has(s.date));
+  const span = lastNDays(range, today);
+  const spanSet = new Set(span);
+  const inRange = sessions.filter((s) => spanSet.has(s.date));
   const runs = inRange.filter((s) => s.kind === "run");
   const lifts = inRange.filter((s) => s.kind === "lift");
   const rests = inRange.filter((s) => s.kind === "rest");
 
-  const weeks = weekBuckets(12, today).map((mon) => {
-    const wk = sessions.filter((s) => s.date >= mon && s.date < addDays(mon, 7));
-    const km = sum(wk.filter((s) => s.kind === "run").map((s) => s.distanceKm || 0));
-    return { mon, label: fmtShort(mon), dist: round(toUnit(km, u), 1) ?? 0, runs: wk.filter((s) => s.kind === "run").length, lifts: wk.filter((s) => s.kind === "lift").length };
-  });
+  const buckets = bucketize(span, range);
+  const noun = bucketNoun(range);
+  const targetPer = noun === "day" ? settings.weeklyDistanceTarget / 7 : noun === "week" ? settings.weeklyDistanceTarget : settings.weeklyDistanceTarget * 4.35;
+  const chart = buckets.map((b) => ({
+    label: b.label,
+    dist: round(toUnit(bucketSum(b, (k) => daily.get(k).runKm), u), 1) ?? 0,
+    runs: b.days.filter((k) => daily.get(k).hasRun).length,
+    lifts: b.days.filter((k) => daily.get(k).hasLift).length,
+    pace: (() => { const p = b.days.map((k) => daily.get(k).paceSecKm).filter(Boolean); return p.length ? round(u === "mi" ? avg(p) * KM_PER_MI : avg(p), 0) : null; })(),
+  }));
 
   const runMix = RUN_TYPES.map((t) => ({ type: t, n: runs.filter((r) => r.type === t).length, km: sum(runs.filter((r) => r.type === t).map((r) => r.distanceKm || 0)) })).filter((x) => x.n);
   const liftMix = LIFT_TYPES.map((t) => ({ type: t, n: lifts.filter((r) => r.type === t).length })).filter((x) => x.n);
@@ -1439,8 +1611,9 @@ function TrainingDash({ sessions, days: dayRecs, settings, setSettings }) {
   const totalKm = sum(runs.map((r) => r.distanceKm || 0));
   const paced = runs.map((r) => ({ p: paceSecOf(r, u), d: r.distanceKm || 0 })).filter((x) => x.p);
   const avgPace = paced.length ? (paced.every((x) => x.d) ? sum(paced.map((x) => x.p * toUnit(x.d, u))) / toUnit(sum(paced.map((x) => x.d)), u) : avg(paced.map((x) => x.p))) : null;
-  const stepsArr = lastNDays(range, today).map((k) => dayRecs.find((d) => d.date === k)?.steps).filter((x) => x != null);
   const longest = runs.reduce((a, r) => ((r.distanceKm || 0) > (a?.distanceKm || 0) ? r : a), null);
+  const stepsArr = span.map((k) => daily.get(k).steps).filter((x) => x != null);
+  const weeks = Math.max(1, range / 7);
 
   const raceDate = settings.race.date ? fromDayKey(settings.race.date) : null;
   const daysOut = raceDate ? Math.ceil((raceDate - new Date()) / 864e5) : null;
@@ -1452,11 +1625,11 @@ function TrainingDash({ sessions, days: dayRecs, settings, setSettings }) {
   return (
     <>
       <div className="panel">
-        <h2>Training <RangeToggle value={range} onChange={setRange} options={[30, 90]} /></h2>
+        <h2>Training <span className="hint">last {range} days</span></h2>
         <div className="body">
           <div className="grid4" style={{ gap: 12 }}>
             <Stat v={round(toUnit(totalKm, u), 1) ?? 0} l={`${u} run`} color={HEX.run}
-                  sub={`${runs.length} run${runs.length === 1 ? "" : "s"}, ${round(toUnit(totalKm, u) / (range / 7), 1)} ${u}/week`} />
+                  sub={`${runs.length} run${runs.length === 1 ? "" : "s"}, ${round(toUnit(totalKm, u) / weeks, 1)} ${u}/week`} />
             <Stat v={avgPace ? secsToClock(avgPace) : null} l={`avg pace per ${u}`} color={HEX.run}
                   sub={longest?.distanceKm ? `longest ${round(toUnit(longest.distanceKm, u), 1)} ${u} (${longest.type})` : ""} />
             <Stat v={lifts.length} l={lifts.length === 1 ? "lift" : "lifts"} color={HEX.lift}
@@ -1468,21 +1641,26 @@ function TrainingDash({ sessions, days: dayRecs, settings, setSettings }) {
       </div>
 
       <div className="panel">
-        <h2>Weekly mileage <span className="hint">last 12 weeks, dashed line = target</span></h2>
+        <h2>Mileage and pace <span className="hint">per {noun}; dashed line = target, pace on the right</span></h2>
         <div className="body" style={{ paddingTop: 8 }}>
-          <Chart h={200}>
-            <ComposedChart data={weeks} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+          <Chart h={210}>
+            <ComposedChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
-              <YAxis tick={axisStyle} tickLine={false} axisLine={false} />
-              <Tooltip content={<Tip fmt={(p) => p.dataKey === "dist" ? `${p.value} ${u}` : p.value} />} />
-              <ReferenceLine y={settings.weeklyDistanceTarget} stroke={HEX.run} strokeDasharray="3 4" opacity={0.6} />
-              <Bar dataKey="dist" name="Distance" radius={[2, 2, 0, 0]}>
-                {weeks.map((w, i) => <Cell key={i} fill={HEX.run} opacity={w.dist >= settings.weeklyDistanceTarget ? 0.95 : 0.55} />)}
+              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+              <YAxis yAxisId="dist" tick={axisStyle} tickLine={false} axisLine={false} />
+              <YAxis yAxisId="pace" orientation="right" reversed domain={["dataMin - 30", "dataMax + 30"]} tick={axisStyle} tickLine={false} axisLine={false} tickFormatter={(v) => secsToClock(v)} width={44} />
+              <Tooltip content={<Tip fmt={(p) => p.dataKey === "dist" ? `${p.value} ${u}` : p.dataKey === "pace" ? `${secsToClock(p.value)}/${u}` : p.value} />} />
+              <ReferenceLine yAxisId="dist" y={round(targetPer, 1)} stroke={HEX.run} strokeDasharray="3 4" opacity={0.6} />
+              <Bar yAxisId="dist" dataKey="dist" name="Distance" radius={[2, 2, 0, 0]}>
+                {chart.map((w, i) => <Cell key={i} fill={HEX.run} opacity={w.dist >= targetPer ? 0.95 : 0.55} />)}
               </Bar>
-              <Line type="monotone" dataKey="lifts" name="Lifts" stroke={HEX.lift} strokeWidth={1.5} dot={{ r: 2.5 }} />
+              <Line yAxisId="pace" type="monotone" dataKey="pace" name="Pace" stroke={HEX.sleep} strokeWidth={1.8} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
             </ComposedChart>
           </Chart>
+          <div className="legend">
+            <span><i style={{ background: HEX.run }} />{u} per {noun}</span>
+            <span><i style={{ background: HEX.sleep }} />avg pace (up is faster)</span>
+          </div>
           <div className="row" style={{ marginTop: 8 }}>
             <label className="f" style={{ width: 150 }}>Weekly target ({u})
               <input value={settings.weeklyDistanceTarget} inputMode="decimal"
@@ -1494,7 +1672,7 @@ function TrainingDash({ sessions, days: dayRecs, settings, setSettings }) {
 
       <div className="grid2">
         <div className="panel">
-          <h2>Run mix <span className="hint">last {range} days</span></h2>
+          <h2>Run mix</h2>
           <div className="body">
             {runMix.length ? (
               <table>
@@ -1514,7 +1692,7 @@ function TrainingDash({ sessions, days: dayRecs, settings, setSettings }) {
           </div>
         </div>
         <div className="panel">
-          <h2>Lift mix <span className="hint">last {range} days</span></h2>
+          <h2>Lift mix</h2>
           <div className="body">
             {liftMix.length ? (
               <table>
@@ -1570,7 +1748,7 @@ function TrainingDash({ sessions, days: dayRecs, settings, setSettings }) {
                   ))}
                 </tbody>
               </table>
-            ) : <p className="empty">Log a workout on the Log tab or import Strava/Strong on the Data tab.</p>}
+            ) : <p className="empty">Log a workout on the Log tab or connect Strava on the Data tab.</p>}
           </div>
         </div>
       </div>
@@ -1582,130 +1760,110 @@ function TrainingDash({ sessions, days: dayRecs, settings, setSettings }) {
 /* Intake                                                             */
 /* ================================================================== */
 
-function IntakeDash({ doses, sleep, sessions, days, settings }) {
+function IntakeDash({ doses, sleep, sessions, days, settings, range }) {
   const daily = useDaily({ doses, sleep, sessions, days, settings });
   const today = toDayKey(new Date());
-  const d30 = lastNDays(30, today);
-  const d90 = lastNDays(90, today);
+  const span = lastNDays(range, today);
+  const buckets = bucketize(span, range);
+  const noun = bucketNoun(range);
 
-  const rows = d30.map((k) => { const x = daily.get(k); return { k, label: fmtShort(k), caf: Math.round(x.caf), alc: round(x.alc, 1) ?? 0, thc: x.thc, nic: x.nic }; });
-  const weeks = weekBuckets(12, today).map((mon) => {
-    const wk = lastNDays(7, addDays(mon, 6)).map((k) => daily.get(k));
-    return { label: fmtShort(mon), alc: round(sum(wk.map((x) => x.alc)), 1) ?? 0, caf: Math.round(avg(wk.map((x) => x.caf)) ?? 0), thc: sum(wk.map((x) => x.thc)), nic: sum(wk.map((x) => x.nic)) };
-  });
+  // one cluster per bucket: coffees as a count, drinks as standard drinks, the rest in mg
+  const chart = buckets.map((b) => ({
+    label: b.label,
+    coffees: bucketSum(b, (k) => daily.get(k).cafCount),
+    drinks: round(bucketSum(b, (k) => daily.get(k).alc), 1),
+    edibles: round(bucketSum(b, (k) => daily.get(k).thcMg), 1),
+    zyns: round(bucketSum(b, (k) => daily.get(k).nicMg), 1),
+    addy: round(bucketSum(b, (k) => daily.get(k).stimMg), 1),
+  }));
 
-  const usedDays = (field) => d30.filter((k) => daily.get(k)[field] > 0).length;
-  const longestClean = (field) => {
+  const tot = (f) => sum(span.map((k) => f(daily.get(k)) || 0));
+  const usedDays = (f) => span.filter((k) => f(daily.get(k)) > 0).length;
+  const longestClean = (f) => {
     let best = 0, cur = 0;
-    for (const k of d90) { if (daily.get(k)[field] > 0) { best = Math.max(best, cur); cur = 0; } else cur++; }
+    for (const k of span) { if (f(daily.get(k)) > 0) { best = Math.max(best, cur); cur = 0; } else cur++; }
     return Math.max(best, cur);
   };
   const thisWeek = lastNDays(7, today).filter((k) => k >= mondayOf(today));
   const wkDrinks = sum(thisWeek.map((k) => daily.get(k).alc));
-  const overCaf = d30.filter((k) => daily.get(k).caf > settings.caffeineLimitMg).length;
+  const overCaf = span.filter((k) => daily.get(k).caf > settings.caffeineLimitMg).length;
+  const heavy = span.filter((k) => { const x = daily.get(k); return x.alc > 4.5 || x.thcMg > 5; }).length;
+  const clean = span.filter((k) => { const x = daily.get(k); return !x.caf && !x.alc && !x.thc && !x.nic && !x.stim; }).length;
+  const weeks = Math.max(1, range / 7);
 
   const recent = [...doses].sort((a, b) => new Date(b.ts) - new Date(a.ts)).slice(0, 20);
+  const C = { coffees: KIND_META.caffeine.hex, drinks: KIND_META.alcohol.hex, edibles: KIND_META.cannabis.hex, zyns: KIND_META.nicotine.hex, addy: KIND_META.stimulant.hex };
+  const tipFmt = (p) => (p.dataKey === "coffees" ? `${p.value} coffee${p.value === 1 ? "" : "s"}` : p.dataKey === "drinks" ? `${p.value} drinks` : `${p.value} mg`);
 
   return (
     <>
       <div className="panel">
-        <h2>Intake <span className="hint">last 30 days</span></h2>
+        <h2>Intake <span className="hint">last {range} days</span></h2>
         <div className="body">
           <div className="grid4" style={{ gap: 12 }}>
-            <Stat v={Math.round(avg(rows.map((r) => r.caf)) ?? 0)} l="mg caffeine / day" color={KIND_META.caffeine.hex}
+            <Stat v={round(tot((x) => x.cafCount) / weeks, 1)} l="coffees / week" color={C.coffees}
                   sub={overCaf ? `${overCaf} day${overCaf === 1 ? "" : "s"} over ${settings.caffeineLimitMg} mg` : `never over ${settings.caffeineLimitMg} mg`} />
-            <Stat v={round(sum(rows.map((r) => r.alc)), 1) ?? 0} l="drinks in 30 days" color={KIND_META.alcohol.hex}
-                  sub={`${usedDays("alc")} drinking days · ${round(wkDrinks, 1)} of ${settings.drinksWeeklyLimit} this week`}
-                  bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.alert : KIND_META.alcohol.hex }} />
-            <Stat v={usedDays("thc")} l="cannabis days" color={KIND_META.cannabis.hex}
-                  sub={`${daysSince(doses, "cannabis") ?? "—"}d since last · longest break ${longestClean("thc")}d`} />
-            <Stat v={usedDays("nic")} l="nicotine days" color={KIND_META.nicotine.hex}
-                  sub={`${daysSince(doses, "nicotine") ?? "—"}d since last · longest break ${longestClean("nic")}d`} />
-            {(usedDays("stim") > 0 || doses.some((d) => d.kind === "stimulant")) && (
-              <Stat v={usedDays("stim")} l="stimulant days" color={KIND_META.stimulant.hex}
-                    sub={`${daysSince(doses, "stimulant") ?? "—"}d since last · longest break ${longestClean("stim")}d`} />
-            )}
-            <Stat v={d30.filter((k) => { const x = daily.get(k); return !x.caf && !x.alc && !x.thc && !x.nic && !x.stim; }).length}
-                  l="days with nothing logged" color={HEX.lift} />
+            <Stat v={round(tot((x) => x.alc) / weeks, 1)} l="drinks / week" color={C.drinks}
+                  sub={`${usedDays((x) => x.alc)} drinking days · ${round(wkDrinks, 1)} of ${settings.drinksWeeklyLimit} this week`}
+                  bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.alert : C.drinks }} />
+            <Stat v={round(tot((x) => x.thcMg) / weeks, 1)} l="mg THC / week" color={C.edibles}
+                  sub={`${usedDays((x) => x.thc)} days · ${daysSince(doses, "cannabis") ?? "—"}d since last · longest break ${longestClean((x) => x.thc)}d`} />
+            <Stat v={round(tot((x) => x.nicMg) / weeks, 1)} l="mg nicotine / week" color={C.zyns}
+                  sub={`${usedDays((x) => x.nic)} days · ${daysSince(doses, "nicotine") ?? "—"}d since last · longest break ${longestClean((x) => x.nic)}d`} />
+            <Stat v={round(tot((x) => x.stimMg) / weeks, 1)} l="mg adderall / week" color={C.addy}
+                  sub={`${usedDays((x) => x.stim)} days · ${daysSince(doses, "stimulant") ?? "—"}d since last`} />
+            <Stat v={heavy} l="heavy days" color={HEX.alert}
+                  sub="more than 4.5 drinks or more than 5 mg THC" />
+            <Stat v={clean} l="days with nothing logged" color={HEX.lift}
+                  sub={`${Math.round((clean / span.length) * 100)}% of the range`} />
           </div>
         </div>
       </div>
 
-      <div className="grid2">
-        <div className="panel">
-          <h2>Caffeine by day <span className="hint">dashed = daily limit</span></h2>
-          <div className="body" style={{ paddingTop: 8 }}>
-            <Chart h={170}>
-              <BarChart data={rows} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-                <CartesianGrid stroke={gridStroke} vertical={false} />
-                <XAxis dataKey="label" tick={axisStyle} interval={5} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
-                <YAxis tick={axisStyle} tickLine={false} axisLine={false} />
-                <Tooltip content={<Tip fmt={(p) => `${p.value} mg`} />} />
-                <ReferenceLine y={settings.caffeineLimitMg} stroke={HEX.alert} strokeDasharray="3 4" opacity={0.6} />
-                <Bar dataKey="caf" name="Caffeine" radius={[2, 2, 0, 0]}>
-                  {rows.map((r, i) => <Cell key={i} fill={r.caf > settings.caffeineLimitMg ? HEX.alert : KIND_META.caffeine.hex} opacity={0.8} />)}
-                </Bar>
-              </BarChart>
-            </Chart>
-          </div>
-        </div>
-        <div className="panel">
-          <h2>Drinks by week <span className="hint">dashed = weekly limit</span></h2>
-          <div className="body" style={{ paddingTop: 8 }}>
-            <Chart h={170}>
-              <BarChart data={weeks} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-                <CartesianGrid stroke={gridStroke} vertical={false} />
-                <XAxis dataKey="label" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
-                <YAxis tick={axisStyle} tickLine={false} axisLine={false} allowDecimals={false} />
-                <Tooltip content={<Tip />} />
-                <ReferenceLine y={settings.drinksWeeklyLimit} stroke={HEX.alert} strokeDasharray="3 4" opacity={0.6} />
-                <Bar dataKey="alc" name="Drinks" radius={[2, 2, 0, 0]}>
-                  {weeks.map((w, i) => <Cell key={i} fill={w.alc > settings.drinksWeeklyLimit ? HEX.alert : KIND_META.alcohol.hex} opacity={0.8} />)}
-                </Bar>
-              </BarChart>
-            </Chart>
+      <div className="panel">
+        <h2>Everything, side by side <span className="hint">per {noun}; coffees and drinks on the left, mg on the right</span></h2>
+        <div className="body" style={{ paddingTop: 8 }}>
+          <Chart h={240}>
+            <BarChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }} barCategoryGap="22%" barGap={1}>
+              <CartesianGrid stroke={gridStroke} vertical={false} />
+              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+              <YAxis yAxisId="count" tick={axisStyle} tickLine={false} axisLine={false} allowDecimals={false} />
+              <YAxis yAxisId="mg" orientation="right" tick={axisStyle} tickLine={false} axisLine={false} />
+              <Tooltip content={<Tip fmt={tipFmt} />} />
+              <Bar yAxisId="count" dataKey="coffees" name="Coffees" fill={C.coffees} radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="count" dataKey="drinks" name="Drinks" fill={C.drinks} radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="mg" dataKey="edibles" name="THC mg" fill={C.edibles} radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="mg" dataKey="zyns" name="Nicotine mg" fill={C.zyns} radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="mg" dataKey="addy" name="Adderall mg" fill={C.addy} radius={[2, 2, 0, 0]} />
+            </BarChart>
+          </Chart>
+          <div className="legend">
+            <span><i style={{ background: C.coffees }} />coffees (count)</span>
+            <span><i style={{ background: C.drinks }} />drinks</span>
+            <span><i style={{ background: C.edibles }} />THC mg</span>
+            <span><i style={{ background: C.zyns }} />nicotine mg</span>
+            <span><i style={{ background: C.addy }} />adderall mg</span>
           </div>
         </div>
       </div>
 
-      <div className="grid2">
-        <div className="panel">
-          <h2>Cannabis and nicotine by week <span className="hint">entries per week</span></h2>
-          <div className="body" style={{ paddingTop: 8 }}>
-            <Chart h={170}>
-              <BarChart data={weeks} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-                <CartesianGrid stroke={gridStroke} vertical={false} />
-                <XAxis dataKey="label" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
-                <YAxis tick={axisStyle} tickLine={false} axisLine={false} allowDecimals={false} />
-                <Tooltip content={<Tip />} />
-                <Bar dataKey="thc" name="Cannabis" fill={KIND_META.cannabis.hex} opacity={0.8} radius={[2, 2, 0, 0]} />
-                <Bar dataKey="nic" name="Nicotine" fill={KIND_META.nicotine.hex} opacity={0.8} radius={[2, 2, 0, 0]} />
-              </BarChart>
-            </Chart>
-            <div className="legend">
-              <span><i style={{ background: KIND_META.cannabis.hex }} />cannabis</span>
-              <span><i style={{ background: KIND_META.nicotine.hex }} />nicotine</span>
-            </div>
-          </div>
-        </div>
-        <div className="panel">
-          <h2>Recent entries</h2>
-          <div className="body">
-            {recent.length ? (
-              <table>
-                <thead><tr><th>When</th><th>What</th><th className="num">Amount</th></tr></thead>
-                <tbody>
-                  {recent.map((d) => (
-                    <tr key={d.id}>
-                      <td style={{ whiteSpace: "nowrap", color: "var(--soft)" }}>{fmtShort(dayKeyFor(d.ts, settings.dayStartHour))} {fmtClock(d.ts)}</td>
-                      <td><span style={{ color: KIND_META[d.kind]?.color, marginRight: 6 }}>●</span>{d.label}</td>
-                      <td className="num">{d.amount} {d.unit}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : <p className="empty">Nothing logged yet.</p>}
-          </div>
+      <div className="panel">
+        <h2>Recent entries</h2>
+        <div className="body">
+          {recent.length ? (
+            <table>
+              <thead><tr><th>When</th><th>What</th><th className="num">Amount</th></tr></thead>
+              <tbody>
+                {recent.map((d) => (
+                  <tr key={d.id}>
+                    <td style={{ whiteSpace: "nowrap", color: "var(--soft)" }}>{fmtShort(dayKeyFor(d.ts, settings.dayStartHour))} {fmtClock(d.ts)}</td>
+                    <td><span style={{ color: KIND_META[d.kind]?.color, marginRight: 6 }}>●</span>{d.label}</td>
+                    <td className="num">{d.amount} {d.unit}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <p className="empty">Nothing logged yet.</p>}
         </div>
       </div>
     </>
@@ -2252,6 +2410,7 @@ export default function HealthLog({ email, onSignOut }) {
   const [loaded, setLoaded] = useState(false);
   const [storageOk, setStorageOk] = useState(true);
   const [tab, setTab] = useState("log");
+  const [range, setRange] = useState(30);
   const [dayKey, setDayKey] = useState(addDays(toDayKey(new Date()), -1));
   const [doses, setDoses] = useState([]);
   const [sleep, setSleep] = useState([]);
@@ -2339,14 +2498,16 @@ export default function HealthLog({ email, onSignOut }) {
           ))}
         </nav>
 
+        {tab !== "log" && tab !== "data" && <RangeBar value={range} onChange={setRange} />}
+
         {tab === "log" && (
           <Log dayKey={dayKey} setDayKey={setDayKey} doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings}
                addDose={addDose} removeDose={removeDose} upsertSleep={upsertSleep} addSession={addSession} removeSession={removeSession} upsertDay={upsertDay} />
         )}
-        {tab === "overview" && <Overview doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} goLog={goLog} />}
-        {tab === "sleep" && <SleepDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} />}
-        {tab === "training" && <TrainingDash sessions={sessions} days={days} settings={settings} setSettings={setSettings} />}
-        {tab === "intake" && <IntakeDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} />}
+        {tab === "overview" && <Overview doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} goLog={goLog} />}
+        {tab === "sleep" && <SleepDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} />}
+        {tab === "training" && <TrainingDash sessions={sessions} days={days} doses={doses} sleep={sleep} settings={settings} setSettings={setSettings} range={range} />}
+        {tab === "intake" && <IntakeDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} />}
         {tab === "data" && (
           <Data state={{ doses, sleep, sessions: manualSessions, lifts, days, settings }} setSleep={setSleep} setSessions={setManualSessions}
                 setLifts={setLifts} setDoses={setDoses} setDays={setDays} settings={settings} setSettings={setSettings}

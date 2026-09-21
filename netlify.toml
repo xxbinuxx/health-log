@@ -2,7 +2,11 @@
   command = "npm run build"
   publish = "dist"
 
-# Send every path to the app so refreshing the page never 404s.
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+# Send every other path to the app so refreshing the page never 404s.
 [[redirects]]
   from = "/*"
   to = "/index.html"

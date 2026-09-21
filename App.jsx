@@ -977,7 +977,7 @@ function regenRaw(x, settings) {
   return null;
 }
 
-// Run Readiness: distance and pace. A run of a quarter of your weekly target scores 100 on distance;
+// Run: distance and pace. A run of a quarter of your weekly target scores 100 on distance;
 // pace is judged against your own 90-day median, ten percent faster is full marks.
 function runRaw(x, medianPaceKm, settings) {
   if (!x.hasRun) return 0;
@@ -1039,7 +1039,7 @@ function buildIndices(daily, dayKeys, settings) {
 
 /* ---- global range + buckets ---------------------------------------- */
 
-const RANGES = [[7, "Week"], [30, "30 days"], [180, "180 days"], [365, "Year"], [1825, "5 years"]];
+const RANGES = [[7, "7d"], [30, "30d"], [90, "90d"], [180, "180d"], [365, "365d"]];
 
 // days when short, weeks in the middle, months when long
 function bucketize(dayKeys, range) {
@@ -1126,7 +1126,7 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
 
   return (
     <>
-      <IndexPanel daily={daily} settings={settings} range={range} />
+      <ScoreTrio daily={daily} settings={settings} range={range} />
 
       <div className="panel">
         <h2>Last 7 days <span className="hint">{logged30} of the last 30 days have something logged</span></h2>
@@ -1208,52 +1208,87 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
   );
 }
 
-/* Regen, Run Readiness, Degen: today's reading and the trend over the selected range */
-function IndexPanel({ daily, settings, range }) {
-  const today = toDayKey(new Date());
-  const span = lastNDays(range, today);
-  const rows = useMemo(() => buildIndices(daily, span, settings), [daily, settings, range]);
-  const now = rows[rows.length - 1];
-  const buckets = bucketize(span, range);
-  const byDate = new Map(rows.map((r) => [r.date, r]));
-  const data = buckets.map((b) => ({
-    label: b.label,
-    regen: round(bucketAvg(b, (k) => byDate.get(k)?.regen ?? null), 1),
-    run: round(bucketAvg(b, (k) => byDate.get(k)?.run ?? null), 1),
-    degen: round(bucketAvg(b, (k) => byDate.get(k)?.degen ?? null), 1),
-  }));
-  const C = { regen: HEX.sleep, run: HEX.run, degen: HEX.alert };
-  const word = (v, good) => (v == null ? "no data yet" : good
-    ? v >= 80 ? "strong" : v >= 65 ? "solid" : v >= 50 ? "middling" : "low"
-    : v >= 60 ? "heavy" : v >= 35 ? "elevated" : v >= 15 ? "moderate" : "light");
+/* ---- the scores, shared by every tab ------------------------------- */
 
+const SCORES = {
+  regen: { name: "Regen Score", color: HEX.sleep, good: true, tag: "sleep", blurb: "higher means better sleep" },
+  run:   { name: "Run Score",   color: HEX.run,   good: true, tag: "running", blurb: "higher means more distance, faster pace" },
+  degen: { name: "Degen Score", color: HEX.alert, good: false, tag: "intake", blurb: "higher means more intake; big nights count extra" },
+};
+const scoreWord = (v, good) => (v == null ? "no data yet" : good
+  ? v >= 80 ? "strong" : v >= 65 ? "solid" : v >= 50 ? "middling" : "low"
+  : v >= 60 ? "heavy" : v >= 35 ? "elevated" : v >= 15 ? "moderate" : "light");
+
+function useScores(daily, settings, range) {
+  const today = toDayKey(new Date());
+  return useMemo(() => {
+    const span = lastNDays(range, today);
+    const rows = buildIndices(daily, span, settings);
+    const now = rows[rows.length - 1];                       // built from yesterday back four days
+    const byDate = new Map(rows.map((r) => [r.date, r]));
+    const chart = bucketize(span, range).map((b) => ({
+      label: b.label,
+      regen: round(bucketAvg(b, (k) => byDate.get(k)?.regen ?? null), 1),
+      run: round(bucketAvg(b, (k) => byDate.get(k)?.run ?? null), 1),
+      degen: round(bucketAvg(b, (k) => byDate.get(k)?.degen ?? null), 1),
+    }));
+    return { now, chart };
+  }, [daily, settings, range, today]);
+}
+
+function ScoreLines({ chart, keys, range, h = 220 }) {
+  return (
+    <Chart h={h}>
+      <LineChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+        <CartesianGrid stroke={gridStroke} vertical={false} />
+        <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+        <YAxis domain={[0, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
+        <Tooltip content={<Tip />} />
+        {keys.map((k) => (
+          <Line key={k} type="monotone" dataKey={k} name={SCORES[k].name} stroke={SCORES[k].color} strokeWidth={2.2}
+                dot={range <= 31 && keys.length === 1 ? { r: 2.5 } : false} connectNulls />
+        ))}
+      </LineChart>
+    </Chart>
+  );
+}
+
+/* Overview opener: the three scores on one chart */
+function ScoreTrio({ daily, settings, range }) {
+  const { now, chart } = useScores(daily, settings, range);
   return (
     <div className="panel">
-      <h2>How things stand <span className="hint">each score weighs the last four days: yesterday half, then fading</span></h2>
+      <h2>Regen, Run and Degen <span className="hint">each day weighs the four before it: yesterday half, then fading</span></h2>
       <div className="body">
         <div className="grid3" style={{ gap: 12, marginBottom: 12 }}>
-          <Stat v={now?.regen != null ? Math.round(now.regen) : null} l="Regen Score" color={C.regen}
-                sub={`sleep is ${word(now?.regen, true)}`} bar={now?.regen != null ? { pct: now.regen, color: C.regen } : null} />
-          <Stat v={now?.run != null ? Math.round(now.run) : null} l="Run Readiness" color={C.run}
-                sub={`recent running is ${word(now?.run, true)}`} bar={now?.run != null ? { pct: now.run, color: C.run } : null} />
-          <Stat v={now?.degen != null ? Math.round(now.degen) : null} l="Degen Score" color={C.degen}
-                sub={`intake has been ${word(now?.degen, false)}`} bar={now?.degen != null ? { pct: now.degen, color: C.degen } : null} />
+          {["regen", "run", "degen"].map((k) => (
+            <Stat key={k} v={now?.[k] != null ? Math.round(now[k]) : null} l={SCORES[k].name} color={SCORES[k].color}
+                  sub={`${SCORES[k].tag} has been ${scoreWord(now?.[k], SCORES[k].good)}`}
+                  bar={now?.[k] != null ? { pct: now[k], color: SCORES[k].color } : null} />
+          ))}
         </div>
-        <Chart h={230}>
-          <LineChart data={data} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-            <CartesianGrid stroke={gridStroke} vertical={false} />
-            <XAxis dataKey="label" tick={axisStyle} interval={tickGap(data.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
-            <YAxis domain={[0, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
-            <Tooltip content={<Tip />} />
-            <Line type="monotone" dataKey="regen" name="Regen" stroke={C.regen} strokeWidth={2.2} dot={false} connectNulls />
-            <Line type="monotone" dataKey="run" name="Run Readiness" stroke={C.run} strokeWidth={2.2} dot={false} connectNulls />
-            <Line type="monotone" dataKey="degen" name="Degen" stroke={C.degen} strokeWidth={2.2} dot={false} connectNulls />
-          </LineChart>
-        </Chart>
+        <ScoreLines chart={chart} keys={["regen", "run", "degen"]} range={range} h={240} />
         <div className="legend">
-          <span><i style={{ background: C.regen }} />Regen: higher means better sleep</span>
-          <span><i style={{ background: C.run }} />Run Readiness: higher means more distance, faster pace</span>
-          <span><i style={{ background: C.degen }} />Degen: higher means more intake, with big nights counting extra</span>
+          {["regen", "run", "degen"].map((k) => <span key={k}><i style={{ background: SCORES[k].color }} />{SCORES[k].name.replace(" Score", "")}: {SCORES[k].blurb}</span>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* One score, at the top of its own tab */
+function ScorePanel({ which, daily, settings, range }) {
+  const { now, chart } = useScores(daily, settings, range);
+  const m = SCORES[which];
+  const v = now?.[which];
+  return (
+    <div className="panel">
+      <h2>{m.name} <span className="hint">{m.blurb}</span></h2>
+      <div className="body">
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(150px, 200px) 1fr", gap: 18, alignItems: "start" }}>
+          <Stat v={v != null ? Math.round(v) : null} l="as of yesterday" color={m.color}
+                sub={`${m.tag} has been ${scoreWord(v, m.good)}`} bar={v != null ? { pct: v, color: m.color } : null} />
+          <ScoreLines chart={chart} keys={[which]} range={range} h={150} />
         </div>
       </div>
     </div>
@@ -1429,6 +1464,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
 
   return (
     <>
+      <ScorePanel which="regen" daily={daily} settings={settings} range={range} />
       <div className="panel">
         <h2>Sleep <span className="hint">last {range} days</span></h2>
         <div className="body">
@@ -1624,6 +1660,7 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
 
   return (
     <>
+      <ScorePanel which="run" daily={daily} settings={settings} range={range} />
       <div className="panel">
         <h2>Training <span className="hint">last {range} days</span></h2>
         <div className="body">
@@ -1797,6 +1834,7 @@ function IntakeDash({ doses, sleep, sessions, days, settings, range }) {
 
   return (
     <>
+      <ScorePanel which="degen" daily={daily} settings={settings} range={range} />
       <div className="panel">
         <h2>Intake <span className="hint">last {range} days</span></h2>
         <div className="body">

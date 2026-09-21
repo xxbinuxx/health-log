@@ -4,7 +4,7 @@ import { store } from "./storage";
 import { supabase } from "./supabase";
 import { parseNotes } from "./notesImport";
 import {
-  ResponsiveContainer, LineChart, Line, BarChart, Bar,
+  ResponsiveContainer, LineChart, Line, BarChart, Bar, ScatterChart, Scatter, ZAxis,
   XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, Cell, ComposedChart,
 } from "recharts";
 
@@ -54,17 +54,17 @@ const DEFAULT_SETTINGS = {
 };
 
 const KIND_META = {
-  caffeine: { color: "var(--caf)", name: "Caffeine", hex: "#7A5A33" },
-  alcohol: { color: "var(--alc)", name: "Alcohol", hex: "#7A4A78" },
-  cannabis: { color: "var(--thc)", name: "Cannabis", hex: "#3F7A63" },
-  nicotine: { color: "var(--nic)", name: "Nicotine", hex: "#5E7285" },
-  stimulant: { color: "var(--stim)", name: "Adderall", hex: "#A8473F" },
+  caffeine: { color: "var(--caf)", name: "Caffeine", hex: "#E69F00" },
+  alcohol: { color: "var(--alc)", name: "Alcohol", hex: "#0072B2" },
+  cannabis: { color: "var(--thc)", name: "Cannabis", hex: "#009E73" },
+  nicotine: { color: "var(--nic)", name: "Nicotine", hex: "#4D4D4D" },
+  stimulant: { color: "var(--stim)", name: "Adderall", hex: "#CC79A7" },
 };
 const KIND_ORDER = ["caffeine", "alcohol", "cannabis", "nicotine", "stimulant"];
 
 const RUN_TYPES = ["easy", "long", "tempo", "intervals", "race", "trail"];
 const LIFT_TYPES = ["push", "pull", "legs", "upper", "lower", "full body"];
-const HEX = { run: "#1F7A8C", lift: "#4A7FB5", sleep: "#1B3A6B", rest: "#8598B2", rhr: "#7A4A78", hours: "#6FA8C7", alert: "#B4531F" };
+const HEX = { run: "#009E73", lift: "#E69F00", sleep: "#0072B2", rest: "#767676", rhr: "#CC79A7", hours: "#56B4E9", alert: "#D55E00" };
 
 /* ================================================================== */
 /* helpers                                                            */
@@ -189,6 +189,25 @@ function median(arr) {
   const m = Math.floor(s.length / 2);
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
+/* Linear interpolation into a sorted list, for percentiles. */
+function quantile(sorted, q) {
+  if (!sorted.length) return null;
+  const pos = (sorted.length - 1) * q;
+  const i = Math.floor(pos), frac = pos - i;
+  return i + 1 < sorted.length ? sorted[i] + frac * (sorted[i + 1] - sorted[i]) : sorted[i];
+}
+
+/* Where a value sits in its own window: median = 50, with the ends pinned to the
+   5th and 95th percentiles rather than the single best and worst day, so one outlier
+   cannot flatten everything else. Beyond those ends the index simply saturates. */
+function relToMedian(v, arr) {
+  if (v == null || arr.length < 3) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  const med = median(s), lo = quantile(s, 0.05), hi = quantile(s, 0.95);
+  if (v >= med) return hi <= med ? 50 : clamp(50 + (50 * (v - med)) / (hi - med), 0, 100);
+  return med <= lo ? 50 : clamp((50 * (v - lo)) / (med - lo), 0, 100);
+}
+
 function pearson(xs, ys) {
   const n = xs.length; if (n < 4) return null;
   const mx = avg(xs), my = avg(ys);
@@ -387,11 +406,12 @@ function mergeBy(existing, incoming, keyFn) {
 
 const CSS = `
 .hl {
-  --paper:#EEF2F7; --card:#FFFFFF; --ink:#12233F; --soft:#4A5E7E; --faint:#8598B2;
-  --rule:#CBD8E6; --rule-soft:#E4EBF3;
-  --navy:#1B3A6B;
-  --run:#1F7A8C; --sleep:#1B3A6B; --lift:#4A7FB5; --rest:#8598B2; --alert:#B4531F;
-  --caf:#7A5A33; --alc:#7A4A78; --thc:#3F7A63; --nic:#5E7285; --stim:#A8473F;
+  --paper:#EEF2F7; --card:#FFFFFF; --ink:#0D1B30; --soft:#3D5171; --faint:#6B7F9B;
+  --rule:#B9CADC; --rule-soft:#DCE5EF;
+  --navy:#12345E;
+  /* Okabe-Ito: distinguishable under every common form of colour blindness */
+  --sleep:#0072B2; --run:#009E73; --lift:#E69F00; --rest:#767676; --alert:#D55E00;
+  --caf:#E69F00; --alc:#0072B2; --thc:#009E73; --nic:#4D4D4D; --stim:#CC79A7;
   background:var(--paper); color:var(--ink); min-height:100vh;
   font-family:Aptos,"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
   font-size:14px; line-height:1.45; font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased;
@@ -491,6 +511,8 @@ const CSS = `
 .hl .saved{font-size:11.5px;color:var(--lift);}
 .hl .tag.stim{background:var(--stim);}
 .hl .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--rule-soft);color:var(--soft);}
+.hl .scorerow{display:grid;grid-template-columns:minmax(160px,210px) 1fr;gap:18px;align-items:start;}
+@media(max-width:700px){.hl .scorerow{grid-template-columns:1fr;}}
 .hl .rangebar{display:flex;justify-content:flex-end;margin:-6px 0 14px;}
 .hl .rangebar .seg button{padding:5px 12px;font-size:12.5px;}
 @media(max-width:600px){.hl .rangebar{justify-content:stretch;} .hl .rangebar .seg{display:flex;width:100%;} .hl .rangebar .seg button{flex:1;padding:6px 4px;}}
@@ -530,8 +552,8 @@ function Tip({ active, payload, label, fmt }) {
   );
 }
 
-const axisStyle = { fontSize: 10.5, fill: "#8A978D" };
-const gridStroke = "#DEE5DC";
+const axisStyle = { fontSize: 11, fill: "#3D5171" };
+const gridStroke = "#DCE5EF";
 
 function Chart({ h = 180, children }) {
   return <div style={{ width: "100%", height: h }}><ResponsiveContainer>{children}</ResponsiveContainer></div>;
@@ -1182,13 +1204,17 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
 
       <FortnightStrip days={d14} daily={daily} settings={settings} onPick={goLog} />
 
+      <RunVsState daily={daily} sessions={sessions} settings={settings} range={range} />
+
+      <DegenRidges daily={daily} settings={settings} range={range} />
+
       <div className="panel">
         <h2>Sleep against training load <span className="hint">per {bucketNoun(range)}</span></h2>
         <div className="body" style={{ paddingTop: 8 }}>
           <Chart h={210}>
             <ComposedChart data={trend} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(trend.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(trend.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
               <YAxis yAxisId="score" domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
               <YAxis yAxisId="run" orientation="right" tick={axisStyle} tickLine={false} axisLine={false} />
               <Tooltip content={<Tip fmt={(p) => p.dataKey === "run" ? `${p.value} ${u}` : p.value} />} />
@@ -1211,10 +1237,13 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
 /* ---- the scores, shared by every tab ------------------------------- */
 
 const SCORES = {
-  regen: { name: "Regen Score", color: HEX.sleep, good: true, tag: "sleep", blurb: "higher means better sleep" },
-  run:   { name: "Run Score",   color: HEX.run,   good: true, tag: "running", blurb: "higher means more distance, faster pace" },
-  degen: { name: "Degen Score", color: HEX.alert, good: false, tag: "intake", blurb: "higher means more intake; big nights count extra" },
+  regen: { name: "Regen", color: HEX.sleep, good: true, tag: "sleep", blurb: "higher means better sleep" },
+  run:   { name: "Stamina", color: HEX.run, good: true, tag: "running", blurb: "higher means more distance, faster pace" },
+  degen: { name: "Degen", color: HEX.alert, good: false, tag: "intake", blurb: "higher means more intake; big nights count extra" },
 };
+const SCORE_KEYS = ["regen", "run", "degen"];
+// line style carries the series as well as colour, so the chart survives without colour
+const SCORE_DASH = { regen: "0", run: "7 4", degen: "2 3" };
 const scoreWord = (v, good) => (v == null ? "no data yet" : good
   ? v >= 80 ? "strong" : v >= 65 ? "solid" : v >= 50 ? "middling" : "low"
   : v >= 60 ? "heavy" : v >= 35 ? "elevated" : v >= 15 ? "moderate" : "light");
@@ -1226,27 +1255,61 @@ function useScores(daily, settings, range) {
     const rows = buildIndices(daily, span, settings);
     const now = rows[rows.length - 1];                       // built from yesterday back four days
     const byDate = new Map(rows.map((r) => [r.date, r]));
+
+    // Place each score against its own spread over the window: the window's lowest day
+    // is 0, its median 50, its highest 100. A week is too short for that to say anything,
+    // so 7d keeps the raw number.
+    const indexed = range >= 30;
+    const rel = {}, band = {};
+    for (const k of SCORE_KEYS) {
+      const vals = rows.map((r) => r[k]).filter((v) => v != null);
+      const sorted = [...vals].sort((a, b) => a - b);
+      band[k] = vals.length >= 3
+        ? { median: round(median(vals), 1), lo: round(quantile(sorted, 0.05), 1), hi: round(quantile(sorted, 0.95), 1), n: vals.length }
+        : null;
+      rel[k] = indexed ? round(relToMedian(now?.[k], vals), 0) : null;
+    }
+
     const chart = bucketize(span, range).map((b) => ({
       label: b.label,
       regen: round(bucketAvg(b, (k) => byDate.get(k)?.regen ?? null), 1),
       run: round(bucketAvg(b, (k) => byDate.get(k)?.run ?? null), 1),
       degen: round(bucketAvg(b, (k) => byDate.get(k)?.degen ?? null), 1),
     }));
-    return { now, chart };
+    return { now, rel, band, chart, indexed };
   }, [daily, settings, range, today]);
 }
 
-function ScoreLines({ chart, keys, range, h = 220 }) {
+/* The headline number: placed against the window when there is enough of it, raw otherwise. */
+function ScoreStat({ which, now, rel, band, indexed }) {
+  const m = SCORES[which];
+  const raw = now?.[which];
+  const v = indexed ? rel[which] : raw;
+  const b = band[which];
+  const sub = raw == null ? "nothing logged yet"
+    : indexed && v != null && b
+      ? `${Math.round(raw)} raw · median ${b.median}, usual ${b.lo}–${b.hi}`
+      : `${m.tag} has been ${scoreWord(raw, m.good)}`;
+  return (
+    <Stat v={v != null ? Math.round(v) : null} l={indexed && v != null ? `${m.name}, vs window` : `${m.name}, raw`}
+          color={m.color} sub={sub} bar={v != null ? { pct: v, color: m.color } : null} />
+  );
+}
+
+function ScoreLines({ chart, keys, band, range, h = 220 }) {
   return (
     <Chart h={h}>
       <LineChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
         <CartesianGrid stroke={gridStroke} vertical={false} />
-        <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+        <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
         <YAxis domain={[0, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
         <Tooltip content={<Tip />} />
+        {keys.map((k) => (band?.[k] ? (
+          <ReferenceLine key={`med-${k}`} y={band[k].median} stroke={SCORES[k].color} strokeDasharray="3 4" opacity={0.5} />
+        ) : null))}
         {keys.map((k) => (
-          <Line key={k} type="monotone" dataKey={k} name={SCORES[k].name} stroke={SCORES[k].color} strokeWidth={2.2}
-                dot={range <= 31 && keys.length === 1 ? { r: 2.5 } : false} connectNulls />
+          <Line key={k} type="monotone" dataKey={k} name={SCORES[k].name} stroke={SCORES[k].color} strokeWidth={2.4}
+                strokeDasharray={SCORE_DASH[k]} dot={range <= 31 && keys.length === 1 ? { r: 2.5 } : false} connectNulls />
         ))}
       </LineChart>
     </Chart>
@@ -1255,21 +1318,27 @@ function ScoreLines({ chart, keys, range, h = 220 }) {
 
 /* Overview opener: the three scores on one chart */
 function ScoreTrio({ daily, settings, range }) {
-  const { now, chart } = useScores(daily, settings, range);
+  const sc = useScores(daily, settings, range);
   return (
     <div className="panel">
-      <h2>Regen, Run and Degen <span className="hint">each day weighs the four before it: yesterday half, then fading</span></h2>
+      <h2>Regen, Stamina and Degen
+        <span className="hint">{sc.indexed ? `against your own last ${range} days: 50 is your median, 0 and 100 the 5th and 95th percentiles` : "raw scores; choose 30d or longer to index them"}</span>
+      </h2>
       <div className="body">
         <div className="grid3" style={{ gap: 12, marginBottom: 12 }}>
-          {["regen", "run", "degen"].map((k) => (
-            <Stat key={k} v={now?.[k] != null ? Math.round(now[k]) : null} l={SCORES[k].name} color={SCORES[k].color}
-                  sub={`${SCORES[k].tag} has been ${scoreWord(now?.[k], SCORES[k].good)}`}
-                  bar={now?.[k] != null ? { pct: now[k], color: SCORES[k].color } : null} />
-          ))}
+          {SCORE_KEYS.map((k) => <ScoreStat key={k} which={k} {...sc} />)}
         </div>
-        <ScoreLines chart={chart} keys={["regen", "run", "degen"]} range={range} h={240} />
+        <ScoreLines chart={sc.chart} keys={SCORE_KEYS} band={sc.band} range={range} h={240} />
         <div className="legend">
-          {["regen", "run", "degen"].map((k) => <span key={k}><i style={{ background: SCORES[k].color }} />{SCORES[k].name.replace(" Score", "")}: {SCORES[k].blurb}</span>)}
+          {SCORE_KEYS.map((k) => (
+            <span key={k}>
+              <svg width="26" height="9" style={{ marginRight: 5, verticalAlign: "-1px" }} aria-hidden="true">
+                <line x1="0" y1="4.5" x2="26" y2="4.5" stroke={SCORES[k].color} strokeWidth="2.4" strokeDasharray={SCORE_DASH[k]} />
+              </svg>
+              {SCORES[k].name}: {SCORES[k].blurb}
+            </span>
+          ))}
+          <span>faint horizontal lines mark each median</span>
         </div>
       </div>
     </div>
@@ -1278,18 +1347,258 @@ function ScoreTrio({ daily, settings, range }) {
 
 /* One score, at the top of its own tab */
 function ScorePanel({ which, daily, settings, range }) {
-  const { now, chart } = useScores(daily, settings, range);
+  const sc = useScores(daily, settings, range);
   const m = SCORES[which];
-  const v = now?.[which];
+  const raw = sc.now?.[which], r = sc.rel[which], b = sc.band[which];
   return (
     <div className="panel">
-      <h2>{m.name} <span className="hint">{m.blurb}</span></h2>
+      <h2>{m.name} Score
+        <span className="hint">{m.blurb}{sc.indexed ? ` · yesterday, against your last ${range} days` : " · yesterday"}</span>
+      </h2>
       <div className="body">
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(150px, 200px) 1fr", gap: 18, alignItems: "start" }}>
-          <Stat v={v != null ? Math.round(v) : null} l="as of yesterday" color={m.color}
-                sub={`${m.tag} has been ${scoreWord(v, m.good)}`} bar={v != null ? { pct: v, color: m.color } : null} />
-          <ScoreLines chart={chart} keys={[which]} range={range} h={150} />
+        <div className="scorerow">
+          <div>
+            <ScoreStat which={which} {...sc} />
+            {sc.indexed && raw != null && b && (
+              <p className="note" style={{ marginTop: 8 }}>
+                {r == null ? "Not enough days in this window to place it."
+                  : r >= 50
+                    ? `${Math.round(r) - 50} of the 50 points from your median up to a top-5% day in this window.`
+                    : `${50 - Math.round(r)} of the 50 points from your median down to a bottom-5% day in this window.`}
+              </p>
+            )}
+          </div>
+          <ScoreLines chart={sc.chart} keys={[which]} band={sc.band} range={range} h={160} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* How runs land depending on the state you were in.
+   Position is the context you ran in, the dot is the run itself. */
+function RunVsState({ daily, sessions, settings, range }) {
+  const today = toDayKey(new Date());
+  const [lag, setLag] = useState(1);
+  const u = settings.distanceUnit;
+
+  const { pts, buckets, r } = useMemo(() => {
+    const span = lastNDays(range, today);
+    const raw = buildIndices(daily, span, settings);
+    // Both axes use the same window-relative scale as the score cards, so 50 is your
+    // median on each and the dots use the whole square instead of hugging one edge.
+    const regVals = raw.map((x) => x.regen).filter((v) => v != null);
+    const degVals = raw.map((x) => x.degen).filter((v) => v != null);
+    const idx = new Map(raw.map((x) => [x.date, {
+      regen: relToMedian(x.regen, regVals), degen: relToMedian(x.degen, degVals),
+      regenRaw: x.regen, degenRaw: x.degen,
+    }]));
+
+    // pace is judged inside its own run type, so a long run isn't punished for being slow
+    const byType = new Map();
+    for (const s of sessions) {
+      if (s.kind !== "run") continue;
+      const p = paceSecOf(s, "km"); if (!p) continue;
+      if (!byType.has(s.type)) byType.set(s.type, []);
+      byType.get(s.type).push(p);
+    }
+    const medByType = new Map([...byType].map(([t, v]) => [t, median(v)]));
+
+    const out = [];
+    for (const s of sessions) {
+      if (s.kind !== "run" || !s.distanceKm) continue;
+      const state = idx.get(addDays(s.date, -(lag - 1)));      // lag 1 = the morning of the run
+      if (!state || state.degen == null || state.regen == null) continue;
+      const p = paceSecOf(s, "km");
+      const med = medByType.get(s.type);
+      const rel = p && med ? (med - p) / med : null;            // + = faster than usual for the type
+      out.push({
+        degen: state.degen, regen: state.regen,
+        degenRaw: state.degenRaw, regenRaw: state.regenRaw,
+        dist: round(toUnit(s.distanceKm, u), 1), z: round(toUnit(s.distanceKm, u), 1),
+        rel, date: s.date, type: s.type,
+        pace: p ? secsToClock(u === "mi" ? p * KM_PER_MI : p) : null,
+      });
+    }
+
+    const B = [["light", 0, 33], ["moderate", 33, 60], ["heavy", 60, 101]];
+    const bk = B.map(([name, lo, hi]) => {
+      const g = out.filter((o) => o.degen >= lo && o.degen < hi);
+      const paced = g.filter((o) => o.rel != null);
+      return {
+        name, n: g.length,
+        dist: g.length ? round(avg(g.map((o) => o.dist)), 1) : null,
+        rel: paced.length ? round(avg(paced.map((o) => o.rel)) * 100, 1) : null,
+      };
+    });
+    const withPace = out.filter((o) => o.rel != null);
+    return { pts: out, buckets: bk, r: pearson(withPace.map((o) => o.degen), withPace.map((o) => o.rel)) };
+  }, [daily, sessions, settings, range, lag, u, today]);
+
+  // colour and shape both carry the pace: up-triangle faster, square typical, down-triangle slower
+  const paceBand = (rel) => (rel == null || Math.abs(rel) <= 0.02 ? "same" : rel > 0 ? "fast" : "slow");
+  const BAND = { fast: HEX.run, same: HEX.rest, slow: HEX.alert };
+  const dotColor = (rel) => BAND[paceBand(rel)];
+  const dotShape = (props) => {
+    const { cx, cy, payload, fill } = props;
+    const r = Math.max(4, Math.sqrt(Math.max(0, payload.z)) * 2.2);
+    const b = paceBand(payload.rel);
+    const common = { fill, fillOpacity: 0.55, stroke: fill, strokeWidth: 1.6 };
+    if (b === "fast") return <polygon points={`${cx},${cy - r} ${cx + r},${cy + r * 0.75} ${cx - r},${cy + r * 0.75}`} {...common} />;
+    if (b === "slow") return <polygon points={`${cx},${cy + r} ${cx + r},${cy - r * 0.75} ${cx - r},${cy - r * 0.75}`} {...common} />;
+    return <rect x={cx - r * 0.8} y={cy - r * 0.8} width={r * 1.6} height={r * 1.6} {...common} />;
+  };
+  const rWord = r == null ? "not enough runs with pace yet"
+    : Math.abs(r) < 0.2 ? "no clear link" : r < 0 ? "heavier days do track with slower running" : "heavier days track with faster running, which is worth a second look";
+
+  return (
+    <div className="panel">
+      <h2>Runs against the state you were in
+        <span className="seg" style={{ fontSize: 12 }}>
+          {[[1, "same morning"], [2, "next day"], [3, "two days later"]].map(([v, name]) => (
+            <button key={v} aria-pressed={lag === v} onClick={() => setLag(v)} style={{ padding: "3px 9px", fontSize: 12 }}>{name}</button>
+          ))}
+        </span>
+      </h2>
+      <div className="body" style={{ paddingTop: 8 }}>
+        {pts.length < 3 ? (
+          <p className="empty">Needs a few more runs with pace in this range. Widen the range or import more history from Strava.</p>
+        ) : (
+          <>
+            <Chart h={300}>
+              <ScatterChart margin={{ top: 10, right: 12, left: -12, bottom: 4 }}>
+                <CartesianGrid stroke={gridStroke} />
+                <XAxis type="number" dataKey="degen" name="Degen" domain={[0, 100]} tick={axisStyle}
+                       tickLine={false} axisLine={{ stroke: "#B9CADC" }}
+                       label={{ value: "Degen, vs your median →", position: "insideBottomRight", offset: -2, fill: "#8598B2", fontSize: 11 }} />
+                <YAxis type="number" dataKey="regen" name="Regen" domain={[0, 100]} tick={axisStyle}
+                       tickLine={false} axisLine={false}
+                       label={{ value: "Regen, vs your median →", angle: -90, position: "insideLeft", offset: 18, fill: "#8598B2", fontSize: 11 }} />
+                <ZAxis type="number" dataKey="z" range={[40, 420]} />
+                <ReferenceLine x={50} stroke="#B9CADC" />
+                <ReferenceLine y={50} stroke="#B9CADC" />
+                <Tooltip content={({ active, payload }) => {
+                  if (!active || !payload?.length) return null;
+                  const d = payload[0].payload;
+                  return (
+                    <div className="rc-tip">
+                      <b>{fmtDayLabel(d.date)}</b>
+                      <div>{d.dist} {u} {d.type}{d.pace ? ` at ${d.pace}/${u}` : ""}</div>
+                      <div>Regen {Math.round(d.regen)} · Degen {Math.round(d.degen)} <span style={{ color: "var(--faint)" }}>(raw {Math.round(d.regenRaw)} / {Math.round(d.degenRaw)})</span></div>
+                      {d.rel != null && <div>{d.rel >= 0 ? "faster" : "slower"} than your usual {d.type} pace by {Math.abs(round(d.rel * 100, 1))}%</div>}
+                    </div>
+                  );
+                }} />
+                <Scatter data={pts} shape={dotShape}>
+                  {pts.map((p, i) => <Cell key={i} fill={dotColor(p.rel)} />)}
+                </Scatter>
+              </ScatterChart>
+            </Chart>
+            <div className="legend">
+              <span>each mark is a run · bigger means further</span>
+              <span><i style={{ background: HEX.run, clipPath: "polygon(50% 0, 100% 100%, 0 100%)" }} />▲ faster than usual for that run type</span>
+              <span><i style={{ background: HEX.rest }} />■ about usual</span>
+              <span><i style={{ background: HEX.alert, clipPath: "polygon(0 0, 100% 0, 50% 100%)" }} />▼ slower</span>
+              <span>both axes are relative to your own median for the range, so 50 is a typical day</span>
+            </div>
+            <div className="divline" />
+            <table>
+              <thead><tr><th>Degen at the time</th><th className="num">Runs</th><th className="num">Avg {u}</th><th className="num">Pace vs usual</th></tr></thead>
+              <tbody>
+                {buckets.map((b) => (
+                  <tr key={b.name}>
+                    <td style={{ textTransform: "capitalize" }}>{b.name}</td>
+                    <td className="num">{b.n}</td>
+                    <td className="num">{b.dist ?? "—"}</td>
+                    <td className="num" style={{ color: b.rel == null ? undefined : b.rel > 0 ? HEX.run : HEX.alert }}>
+                      {b.rel == null ? "—" : `${b.rel > 0 ? "+" : ""}${b.rel}%`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="note" style={{ marginTop: 10 }}>
+              {rWord}{r != null ? ` (r = ${round(r, 2)})` : ""}. Bucketed averages are steadier than the scatter while the history is thin.
+              Bear in mind you may choose an easy run after a heavy night, so some of this is your decision rather than your legs.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Degen by weekday, drawn as overlapping density curves. */
+function DegenRidges({ daily, settings, range }) {
+  const today = toDayKey(new Date());
+  const rows = useMemo(() => {
+    const span = lastNDays(range, today);
+    const idx = buildIndices(daily, span, settings);
+    const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const byDow = new Map(DOW.map((d) => [d, []]));
+    for (const x of idx) if (x.degen != null) byDow.get(DOW[fromDayKey(x.date).getDay()]).push(x.degen);
+
+    // a gaussian kernel over 0..100, so a handful of days still reads as a curve
+    const grid = Array.from({ length: 51 }, (_, i) => i * 2);
+    const bw = 9;
+    return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => {
+      const v = byDow.get(d);
+      const dens = grid.map((g) => sum(v.map((x) => Math.exp(-((g - x) ** 2) / (2 * bw * bw)))) / (v.length || 1));
+      const peak = Math.max(...dens, 1e-9);
+      return { day: d, n: v.length, med: v.length ? round(median(v), 0) : null, dens: dens.map((y) => y / peak) };
+    });
+  }, [daily, settings, range, today]);
+
+  const W = 720, rowH = 42, padL = 46, padR = 62, padT = 50;
+  const H = padT + rows.length * rowH + 24;
+  const iw = W - padL - padR;
+  const x = (i) => padL + (i / 50) * iw;
+  const anyData = rows.some((r) => r.n > 0);
+
+  return (
+    <div className="panel">
+      <h2>Degen by day of the week <span className="hint">where each weekday's days tend to land</span></h2>
+      <div className="body" style={{ paddingTop: 10 }}>
+        {!anyData ? <p className="empty">Nothing to draw yet.</p> : (
+          <>
+            <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="Degen distribution by weekday">
+              {[0, 25, 50, 75, 100].map((g) => (
+                <g key={g}>
+                  <line x1={x(g / 2)} x2={x(g / 2)} y1={10} y2={padT + (rows.length - 1) * rowH + 6} stroke="#DCE5EF" />
+                  <text x={x(g / 2)} y={H - 6} fontSize="10" fill="#6B7F9B" textAnchor="middle">{g}</text>
+                </g>
+              ))}
+              {rows.map((r, ri) => {
+                const base = padT + ri * rowH;
+                const amp = rowH * 1.05;
+                const path = r.dens.map((y, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${(base - y * amp).toFixed(1)}`).join(" ");
+                const weekend = r.day === "Fri" || r.day === "Sat";
+                return (
+                  <g key={r.day}>
+                    <line x1={padL} x2={padL + iw} y1={base} y2={base} stroke="#DCE5EF" />
+                    {r.n > 0 && (
+                      <>
+                        <path d={`${path} L${x(50)},${base} L${padL},${base} Z`} fill={weekend ? HEX.alert : HEX.sleep} opacity={weekend ? 0.28 : 0.16} />
+                        <path d={path} fill="none" stroke={weekend ? HEX.alert : HEX.sleep} strokeWidth="2"
+                              strokeDasharray={weekend ? "6 3" : "0"} />
+                        {r.med != null && <circle cx={x(r.med / 2)} cy={base} r="2.8" fill={weekend ? HEX.alert : HEX.sleep} />}
+                      </>
+                    )}
+                    <text x={padL - 8} y={base - 2} fontSize="11" fill="#4A5E7E" textAnchor="end">{r.day}</text>
+                    <text x={padL + iw + 8} y={base - 2} fontSize="10.5" fill="#6B7F9B">
+                      {r.n ? `${r.med} · ${r.n}d` : "—"}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+            <div className="legend">
+              <span>curves show where that weekday's Degen scores pile up; the dot marks its median</span>
+              <span><i style={{ background: HEX.alert, opacity: 0.6 }} />Fri and Sat, drawn with a dashed outline</span>
+              <span>right-hand figures are median and days counted</span>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1347,7 +1656,7 @@ function FortnightStrip({ days, daily, settings, onPick }) {
       <h2>Fourteen days <span className="hint">tap a day to open it in the log</span></h2>
       <div className="body" style={{ paddingTop: 6 }}>
         <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="Fourteen-day summary">
-          <line x1={0} x2={W} y1={barTop + barH} y2={barTop + barH} stroke="#C7D1C6" />
+          <line x1={0} x2={W} y1={barTop + barH} y2={barTop + barH} stroke="#B9CADC" />
           <line x1={0} x2={W} y1={barTop + barH - (settings.sleepScoreGoal / 100) * barH} y2={barTop + barH - (settings.sleepScoreGoal / 100) * barH} stroke="#33507C" strokeDasharray="3 4" opacity={0.5} />
           {days.map((k, i) => {
             const x = daily.get(k); const cx = i * colW + colW / 2;
@@ -1365,12 +1674,12 @@ function FortnightStrip({ days, daily, settings, onPick }) {
                     <text x={cx} y={barTop + barH - h - 4} fontSize="10.5" fill="#33507C" textAnchor="middle">{score}</text>
                   </>
                 ) : (
-                  <text x={cx} y={barTop + barH - 4} fontSize="10" fill="#C7D1C6" textAnchor="middle">·</text>
+                  <text x={cx} y={barTop + barH - 4} fontSize="10" fill="#B9CADC" textAnchor="middle">·</text>
                 )}
                 {tag && (
                   <>
                     <rect x={cx - 20} y={tagY - 10} width={40} height={16} rx={8}
-                          fill={tag === "run" ? HEX.run : tag === "lift" ? HEX.lift : tag === "both" ? "#6B4A3A" : "#C7D1C6"} />
+                          fill={tag === "run" ? HEX.run : tag === "lift" ? HEX.lift : tag === "both" ? "#6B4A3A" : "#B9CADC"} />
                     <text x={cx} y={tagY + 2} fontSize="9.5" fill={tag === "rest" ? "#5C6B61" : "#fff"} textAnchor="middle">{tag}</text>
                   </>
                 )}
@@ -1491,7 +1800,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
           <Chart h={220}>
             <ComposedChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
               <YAxis yAxisId="score" domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
               <YAxis yAxisId="hours" orientation="right" domain={[0, 10]} tick={axisStyle} tickLine={false} axisLine={false} />
               <Tooltip content={<Tip />} />
@@ -1517,7 +1826,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
               <Chart h={170}>
                 <LineChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
                   <CartesianGrid stroke={gridStroke} vertical={false} />
-                  <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+                  <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
                   <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={axisStyle} tickLine={false} axisLine={false} />
                   <Tooltip content={<Tip />} />
                   <Line type="monotone" dataKey="rhr" name="RHR" stroke={HEX.rhr} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
@@ -1534,7 +1843,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
               <Chart h={170}>
                 <LineChart data={chart} margin={{ top: 6, right: 8, left: -10, bottom: 0 }}>
                   <CartesianGrid stroke={gridStroke} vertical={false} />
-                  <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+                  <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
                   <YAxis domain={["dataMin - 30", "dataMax + 30"]} tick={axisStyle} tickLine={false} axisLine={false} tickFormatter={(v) => fmtBedtime(v)} width={54} />
                   <Tooltip content={<Tip fmt={(p) => fmtBedtime(p.value)} />} />
                   <Line type="monotone" dataKey="bed" name="Bedtime" stroke={HEX.sleep} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
@@ -1550,7 +1859,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
             <Chart h={170}>
               <BarChart data={weekday} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
                 <CartesianGrid stroke={gridStroke} vertical={false} />
-                <XAxis dataKey="day" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+                <XAxis dataKey="day" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
                 <YAxis domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
                 <Tooltip content={<Tip fmt={(p) => `${p.value} (${p.payload.n} nights)`} />} />
                 <Bar dataKey="score" name="Score" radius={[2, 2, 0, 0]}>
@@ -1683,7 +1992,7 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
           <Chart h={210}>
             <ComposedChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
               <YAxis yAxisId="dist" tick={axisStyle} tickLine={false} axisLine={false} />
               <YAxis yAxisId="pace" orientation="right" reversed domain={["dataMin - 30", "dataMax + 30"]} tick={axisStyle} tickLine={false} axisLine={false} tickFormatter={(v) => secsToClock(v)} width={44} />
               <Tooltip content={<Tip fmt={(p) => p.dataKey === "dist" ? `${p.value} ${u}` : p.dataKey === "pace" ? `${secsToClock(p.value)}/${u}` : p.value} />} />
@@ -1864,7 +2173,7 @@ function IntakeDash({ doses, sleep, sessions, days, settings, range }) {
           <Chart h={240}>
             <BarChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }} barCategoryGap="22%" barGap={1}>
               <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#CBD8E6" }} />
+              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
               <YAxis yAxisId="count" tick={axisStyle} tickLine={false} axisLine={false} allowDecimals={false} />
               <YAxis yAxisId="mg" orientation="right" tick={axisStyle} tickLine={false} axisLine={false} />
               <Tooltip content={<Tip fmt={tipFmt} />} />

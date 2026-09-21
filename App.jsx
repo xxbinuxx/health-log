@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import Papa from "papaparse";
 import { store } from "./storage";
+import { supabase } from "./supabase";
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, Cell, ComposedChart,
@@ -1856,6 +1857,8 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
         </div>
       </div>
 
+      <StravaPanel />
+
       <div className="panel">
         <h2>Targets and units</h2>
         <div className="body">
@@ -1917,6 +1920,94 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
         </div>
       </div>
     </>
+  );
+}
+
+function StravaPanel() {
+  const [status, setStatus] = useState("checking");   // checking | off | linked
+  const [auto, setAuto] = useState(null);             // null = unknown, true/false once checked
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState("");
+
+  const call = async (path) => {
+    const { data } = await supabase.auth.getSession();
+    const r = await fetch(path, { headers: { Authorization: `Bearer ${data.session?.access_token ?? ""}` } });
+    const j = await r.json().catch(() => ({ error: "The server function did not reply. Is the latest version deployed?" }));
+    if (!r.ok || j.error) throw new Error(j.error || `Request failed (${r.status})`);
+    return j;
+  };
+
+  useEffect(() => {
+    (async () => {
+      const { data: u } = await supabase.auth.getUser();
+      if (!u?.user) return;
+      const { data } = await supabase.from("strava_tokens").select("athlete_id").eq("user_id", u.user.id).maybeSingle();
+      setStatus(data ? "linked" : "off");
+      if (data) call("/.netlify/functions/strava-subscribe?action=status").then((j) => setAuto(!!j.active)).catch(() => setAuto(null));
+    })();
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("strava")) {
+      setMsg({ bad: p.get("strava") !== "connected", text: p.get("msg") || "" });
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
+  const run = async (label, path, after) => {
+    setBusy(label); setMsg(null);
+    try { const j = await call(path); setMsg({ text: j.message || "Done." }); after?.(j); }
+    catch (e) { setMsg({ bad: true, text: String(e.message || e) }); }
+    finally { setBusy(""); }
+  };
+
+  const connect = () => run("connect", "/.netlify/functions/strava-auth", (j) => { window.location.href = j.url; });
+  const disconnect = async () => {
+    if (!confirm("Disconnect Strava? Runs already logged stay where they are.")) return;
+    const { data: u } = await supabase.auth.getUser();
+    await supabase.from("strava_tokens").delete().eq("user_id", u.user.id);
+    try { await call("/.netlify/functions/strava-subscribe?action=off"); } catch { /* subscription may already be gone */ }
+    setStatus("off"); setAuto(null); setMsg({ text: "Strava disconnected." });
+  };
+
+  return (
+    <div className="panel">
+      <h2>Strava <span className="hint">{status === "linked" ? (auto ? "connected, syncing automatically" : "connected") : status === "off" ? "not connected" : ""}</span></h2>
+      <div className="body">
+        {status === "off" && (
+          <>
+            <p className="note" style={{ marginBottom: 10 }}>
+              Your watch already sends runs to Strava. Connect it here and they land in this log by themselves.
+            </p>
+            <button className="solid" onClick={connect} disabled={busy === "connect"}>
+              {busy === "connect" ? "Opening Strava…" : "Connect Strava"}
+            </button>
+          </>
+        )}
+        {status === "linked" && (
+          <>
+            <div className="row" style={{ gap: 10 }}>
+              <button className="solid" onClick={() => run("sync", "/.netlify/functions/strava-sync?days=30", () => setTimeout(() => window.location.reload(), 1200))} disabled={!!busy}>
+                {busy === "sync" ? "Pulling…" : "Pull the last 30 days"}
+              </button>
+              {auto ? (
+                <button className="ghost" onClick={() => run("auto", "/.netlify/functions/strava-subscribe?action=off", () => setAuto(false))} disabled={!!busy}>Turn automatic sync off</button>
+              ) : (
+                <button className="ghost" onClick={() => run("auto", "/.netlify/functions/strava-subscribe?action=on", () => setAuto(true))} disabled={!!busy}>
+                  {busy === "auto" ? "Setting up…" : "Turn automatic sync on"}
+                </button>
+              )}
+              <button className="ghost" onClick={disconnect} disabled={!!busy}>Disconnect</button>
+            </div>
+            <p className="note" style={{ marginTop: 10 }}>
+              {auto
+                ? "New runs appear about a minute after they reach Strava. Pull the last 30 days if one ever goes missing."
+                : "Automatic sync is off, so runs only arrive when you pull them."}
+              {" "}A Strava run replaces a run you typed by hand on the same day, keeping your type and note.
+            </p>
+          </>
+        )}
+        {msg && <p className="note" style={{ marginTop: 10, color: msg.bad ? "var(--run)" : "var(--lift)" }}>{msg.text}</p>}
+      </div>
+    </div>
   );
 }
 

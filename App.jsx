@@ -1985,8 +1985,11 @@ function StravaPanel() {
         {status === "linked" && (
           <>
             <div className="row" style={{ gap: 10 }}>
-              <button className="solid" onClick={() => run("sync", "/.netlify/functions/strava-sync?days=30", () => setTimeout(() => window.location.reload(), 1200))} disabled={!!busy}>
+              <button className="solid" onClick={() => run("sync", "/.netlify/functions/strava-sync?days=30", () => setTimeout(() => window.location.reload(), 1500))} disabled={!!busy}>
                 {busy === "sync" ? "Pulling…" : "Pull the last 30 days"}
+              </button>
+              <button className="ghost" onClick={() => { if (confirm("Pull every run Strava has? This can take a minute.")) run("all", "/.netlify/functions/strava-sync?days=7300", () => setTimeout(() => window.location.reload(), 2500)); }} disabled={!!busy}>
+                {busy === "all" ? "Pulling your whole history…" : "Pull everything"}
               </button>
               {auto ? (
                 <button className="ghost" onClick={() => run("auto", "/.netlify/functions/strava-subscribe?action=off", () => setAuto(false))} disabled={!!busy}>Turn automatic sync off</button>

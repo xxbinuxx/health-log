@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import Papa from "papaparse";
 import { store } from "./storage";
 import { supabase } from "./supabase";
+import { parseNotes } from "./notesImport";
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, Cell, ComposedChart,
@@ -48,20 +49,22 @@ const DEFAULT_SETTINGS = {
     { id: "n1", kind: "nicotine", label: "Pouch", amount: 6, unit: "mg", ask: true },
     { id: "n2", kind: "nicotine", label: "Cigarette", amount: 1.5, unit: "mg" },
     { id: "n3", kind: "nicotine", label: "Vape", amount: 3, unit: "mg" },
+    { id: "s1", kind: "stimulant", label: "Adderall", amount: 5, unit: "mg", ask: true },
   ],
 };
 
 const KIND_META = {
-  caffeine: { color: "var(--caf)", name: "Caffeine", hex: "#8A5A2B" },
-  alcohol: { color: "var(--alc)", name: "Alcohol", hex: "#7C3F66" },
-  cannabis: { color: "var(--thc)", name: "Cannabis", hex: "#5B4B8A" },
-  nicotine: { color: "var(--nic)", name: "Nicotine", hex: "#63736A" },
+  caffeine: { color: "var(--caf)", name: "Caffeine", hex: "#7A5A33" },
+  alcohol: { color: "var(--alc)", name: "Alcohol", hex: "#7A4A78" },
+  cannabis: { color: "var(--thc)", name: "Cannabis", hex: "#3F7A63" },
+  nicotine: { color: "var(--nic)", name: "Nicotine", hex: "#5E7285" },
+  stimulant: { color: "var(--stim)", name: "Stimulant", hex: "#A8473F" },
 };
-const KIND_ORDER = ["caffeine", "alcohol", "cannabis", "nicotine"];
+const KIND_ORDER = ["caffeine", "alcohol", "cannabis", "nicotine", "stimulant"];
 
 const RUN_TYPES = ["easy", "long", "tempo", "intervals", "race", "trail"];
 const LIFT_TYPES = ["push", "pull", "legs", "upper", "lower", "full body"];
-const HEX = { run: "#BE4A2B", lift: "#2E6B4F", sleep: "#33507C", rest: "#8A978D", rhr: "#7C3F66", hours: "#5B7DB0" };
+const HEX = { run: "#1F7A8C", lift: "#4A7FB5", sleep: "#1B3A6B", rest: "#8598B2", rhr: "#7A4A78", hours: "#6FA8C7", alert: "#B4531F" };
 
 /* ================================================================== */
 /* helpers                                                            */
@@ -383,33 +386,33 @@ function mergeBy(existing, incoming, keyFn) {
 
 const CSS = `
 .hl {
-  --paper:#EDF0EA; --card:#F8FAF6; --ink:#17211C; --soft:#5C6B61; --faint:#8A978D;
-  --rule:#C7D1C6; --rule-soft:#DEE5DC;
-  --run:#BE4A2B; --sleep:#33507C; --lift:#2E6B4F; --rest:#8A978D;
-  --caf:#8A5A2B; --alc:#7C3F66; --thc:#5B4B8A; --nic:#63736A;
+  --paper:#EEF2F7; --card:#FFFFFF; --ink:#12233F; --soft:#4A5E7E; --faint:#8598B2;
+  --rule:#CBD8E6; --rule-soft:#E4EBF3;
+  --navy:#1B3A6B;
+  --run:#1F7A8C; --sleep:#1B3A6B; --lift:#4A7FB5; --rest:#8598B2; --alert:#B4531F;
+  --caf:#7A5A33; --alc:#7A4A78; --thc:#3F7A63; --nic:#5E7285; --stim:#A8473F;
   background:var(--paper); color:var(--ink); min-height:100vh;
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-family:Aptos,"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
   font-size:14px; line-height:1.45; font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased;
 }
 .hl *,.hl *::before,.hl *::after{box-sizing:border-box;}
 .hl .wrap{max-width:1080px;margin:0 auto;padding:20px 18px 64px;}
 .hl header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;
-  padding-bottom:12px;border-bottom:1.5px solid var(--ink);flex-wrap:wrap;}
-.hl .brand{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;font-size:25px;}
-.hl .brand span{color:var(--soft);}
+  padding-bottom:12px;border-bottom:2px solid var(--navy);flex-wrap:wrap;}
+.hl .brand{font-size:25px;font-weight:600;letter-spacing:-0.02em;color:var(--navy);}
+.hl .brand span{color:var(--soft);font-weight:400;letter-spacing:0;}
 .hl .race{text-align:right;font-size:12.5px;color:var(--soft);line-height:1.35;}
-.hl .race b{display:block;font-family:"Iowan Old Style",Palatino,Georgia,serif;
-  font-size:22px;color:var(--run);font-weight:400;}
+.hl .race b{display:block;font-size:22px;color:var(--navy);font-weight:600;letter-spacing:-0.02em;}
 .hl nav{display:flex;gap:2px;margin:14px 0 18px;flex-wrap:wrap;}
 .hl nav button{background:none;border:none;border-bottom:2px solid transparent;padding:6px 12px;
   font:inherit;font-size:13.5px;color:var(--soft);cursor:pointer;}
 .hl nav button:hover{color:var(--ink);}
-.hl nav button[aria-current="true"]{color:var(--ink);border-bottom-color:var(--run);}
-.hl nav button.log[aria-current="true"]{border-bottom-color:var(--ink);}
+.hl nav button[aria-current="true"]{color:var(--navy);font-weight:600;border-bottom-color:var(--navy);}
 .hl nav button:focus-visible,.hl button:focus-visible{outline:2px solid var(--sleep);outline-offset:2px;}
 .hl .panel{background:var(--card);border:1px solid var(--rule);margin-bottom:14px;}
-.hl .panel > h2{margin:0;padding:9px 14px;font-size:12px;font-weight:600;color:var(--soft);
-  border-bottom:1px solid var(--rule-soft);display:flex;justify-content:space-between;align-items:center;gap:10px;}
+.hl .panel{border-radius:3px;}
+.hl .panel > h2{margin:0;padding:9px 14px;font-size:12.5px;font-weight:600;color:var(--navy);
+  background:#F7FAFD;border-bottom:1px solid var(--rule-soft);display:flex;justify-content:space-between;align-items:center;gap:10px;}
 .hl .panel > h2 .hint{font-weight:400;color:var(--faint);}
 .hl .panel .body{padding:14px;}
 .hl .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
@@ -418,7 +421,7 @@ const CSS = `
 @media(max-width:820px){.hl .grid4{grid-template-columns:repeat(2,1fr);}}
 @media(max-width:760px){.hl .grid2,.hl .grid3{grid-template-columns:1fr;}}
 .hl .stat{display:flex;flex-direction:column;gap:1px;}
-.hl .stat .v{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:27px;line-height:1.1;}
+.hl .stat .v{font-size:27px;line-height:1.15;font-weight:600;letter-spacing:-0.02em;}
 .hl .stat .v.sm{font-size:21px;}
 .hl .stat .l{font-size:11.5px;color:var(--faint);}
 .hl .stat .sub{font-size:11.5px;color:var(--soft);}
@@ -437,13 +440,13 @@ const CSS = `
 .hl .chip .amt{color:var(--faint);font-size:11px;}
 .hl .chip span.lbl{color:var(--ink);}
 .hl .chip.caffeine{color:var(--caf);} .hl .chip.alcohol{color:var(--alc);}
-.hl .chip.cannabis{color:var(--thc);} .hl .chip.nicotine{color:var(--nic);}
+.hl .chip.cannabis{color:var(--thc);} .hl .chip.nicotine{color:var(--nic);} .hl .chip.stimulant{color:var(--stim);}
 .hl .chip[aria-pressed="true"]{border-color:currentColor;background:var(--paper);}
 .hl .seg{display:inline-flex;border:1px solid var(--rule);border-radius:2px;overflow:hidden;}
 .hl .seg button{background:#fff;border:none;border-right:1px solid var(--rule);padding:6px 14px;font:inherit;
   font-size:13px;color:var(--soft);cursor:pointer;}
 .hl .seg button:last-child{border-right:none;}
-.hl .seg button[aria-pressed="true"]{background:var(--ink);color:var(--card);}
+.hl .seg button[aria-pressed="true"]{background:var(--navy);color:#fff;}
 .hl .seg button.run[aria-pressed="true"]{background:var(--run);}
 .hl .seg button.lift[aria-pressed="true"]{background:var(--lift);}
 .hl .seg button.rest[aria-pressed="true"]{background:var(--soft);}
@@ -463,21 +466,21 @@ const CSS = `
 .hl td.num,.hl th.num{text-align:right;padding-right:0;}
 .hl tr:last-child td{border-bottom:none;}
 .hl .del{background:none;border:none;color:var(--faint);cursor:pointer;font:inherit;font-size:14px;line-height:1;padding:0 2px;}
-.hl .del:hover{color:var(--run);}
+.hl .del:hover{color:var(--alert);}
 .hl input,.hl select,.hl textarea{font:inherit;font-size:13px;padding:5px 7px;border:1px solid var(--rule);
   background:#fff;color:var(--ink);border-radius:2px;width:100%;}
 .hl input:focus,.hl select:focus,.hl textarea:focus{outline:2px solid var(--sleep);outline-offset:-1px;}
-.hl input.big{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:22px;padding:6px 8px;}
+.hl input.big{font-size:21px;font-weight:600;letter-spacing:-0.01em;padding:6px 8px;}
 .hl label.f{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--soft);}
 .hl .row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;}
-.hl button.solid{background:var(--ink);color:var(--card);border:none;padding:7px 14px;font:inherit;
-  font-size:13px;cursor:pointer;border-radius:2px;}
-.hl button.solid:hover{background:var(--lift);}
-.hl button.solid:disabled{opacity:.4;cursor:default;background:var(--ink);}
-.hl button.danger{border:1px solid var(--run);color:var(--run);background:none;padding:6px 12px;
+.hl button.solid{background:var(--navy);color:#fff;border:none;padding:7px 14px;font:inherit;
+  font-size:13px;font-weight:500;cursor:pointer;border-radius:3px;}
+.hl button.solid:hover{background:#15305A;}
+.hl button.solid:disabled{opacity:.4;cursor:default;background:var(--navy);}
+.hl button.danger{border:1px solid var(--alert);color:var(--alert);background:none;padding:6px 12px;
   font:inherit;font-size:12.5px;cursor:pointer;border-radius:2px;}
 .hl .note{font-size:12px;color:var(--soft);line-height:1.5;}
-.hl .flag{color:var(--run);} .hl .ok{color:var(--lift);}
+.hl .flag{color:var(--alert);} .hl .ok{color:var(--lift);}
 .hl .empty{color:var(--faint);font-size:12.5px;padding:10px 0;}
 .hl .bar-track{height:5px;background:var(--rule-soft);border-radius:3px;overflow:hidden;margin-top:5px;}
 .hl .bar-fill{height:100%;border-radius:3px;}
@@ -485,6 +488,8 @@ const CSS = `
 .hl .legend i{display:inline-block;width:9px;height:9px;margin-right:5px;border-radius:2px;vertical-align:-1px;}
 .hl .divline{height:1px;background:var(--rule-soft);margin:14px 0;}
 .hl .saved{font-size:11.5px;color:var(--lift);}
+.hl .tag.stim{background:var(--stim);}
+.hl .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--rule-soft);color:var(--soft);}
 .hl .rc-tip{background:#fff;border:1px solid var(--rule);padding:6px 9px;font-size:12px;color:var(--ink);}
 .hl .rc-tip b{display:block;color:var(--soft);font-weight:500;margin-bottom:2px;}
 @media (prefers-reduced-motion:reduce){.hl *{transition:none!important;}}
@@ -930,7 +935,7 @@ function useDaily({ doses, sleep, sessions, days = [], settings }) {
   return useMemo(() => {
     const byDay = new Map();
     const day = (k) => {
-      if (!byDay.has(k)) byDay.set(k, { date: k, sleep: null, sessions: [], caf: 0, alc: 0, thc: 0, nic: 0, entries: [], tags: [], note: "", steps: null });
+      if (!byDay.has(k)) byDay.set(k, { date: k, sleep: null, sessions: [], caf: 0, alc: 0, thc: 0, nic: 0, stim: 0, entries: [], tags: [], note: "", steps: null });
       return byDay.get(k);
     };
     for (const s of sleep) if (s.score != null || s.asleepMin != null || s.restingHr != null || s.bodyBattery != null || s.bedtime) day(s.date).sleep = s;
@@ -943,6 +948,7 @@ function useDaily({ doses, sleep, sessions, days = [], settings }) {
       else if (d.kind === "alcohol") x.alc += d.amount;
       else if (d.kind === "cannabis") x.thc += 1;
       else if (d.kind === "nicotine") x.nic += 1;
+      else if (d.kind === "stimulant") x.stim += d.amount;
     }
     for (const x of byDay.values()) {
       x.runKm = sum(x.sessions.filter((s) => s.kind === "run").map((s) => s.distanceKm || 0));
@@ -950,7 +956,7 @@ function useDaily({ doses, sleep, sessions, days = [], settings }) {
       x.hasLift = x.sessions.some((s) => s.kind === "lift");
       x.isRest = !x.hasRun && !x.hasLift && x.sessions.some((s) => s.kind === "rest");
     }
-    const get = (k) => byDay.get(k) || { date: k, sleep: null, sessions: [], caf: 0, alc: 0, thc: 0, nic: 0, entries: [], tags: [], note: "", steps: null, runKm: 0, hasRun: false, hasLift: false, isRest: false };
+    const get = (k) => byDay.get(k) || { date: k, sleep: null, sessions: [], caf: 0, alc: 0, thc: 0, nic: 0, stim: 0, entries: [], tags: [], note: "", steps: null, runKm: 0, hasRun: false, hasLift: false, isRest: false };
     return { byDay, get };
   }, [doses, sleep, sessions, days, settings.dayStartHour]);
 }
@@ -1058,12 +1064,12 @@ function Overview({ doses, sleep, sessions, days, settings, goLog }) {
             <div className="grid2" style={{ gap: 12 }}>
               <Stat v={Math.round(cafAvg7 ?? 0)} l="mg caffeine / day" color={KIND_META.caffeine.hex}
                     sub={cafAvg30 != null ? `${Math.round(cafAvg30)} over 30d` : ""}
-                    bar={{ pct: ((cafAvg7 ?? 0) / settings.caffeineLimitMg) * 100, color: (cafAvg7 ?? 0) > settings.caffeineLimitMg ? HEX.run : KIND_META.caffeine.hex }} />
+                    bar={{ pct: ((cafAvg7 ?? 0) / settings.caffeineLimitMg) * 100, color: (cafAvg7 ?? 0) > settings.caffeineLimitMg ? HEX.alert : KIND_META.caffeine.hex }} />
               <Stat v={round(wkDrinks, 1) ?? 0} l={`drinks of ${settings.drinksWeeklyLimit}`} color={KIND_META.alcohol.hex}
                     sub={[["alcohol", "drink"], ["cannabis", "cannabis"], ["nicotine", "nicotine"]]
                       .map(([k, n]) => { const d = daysSince(doses, k); return d != null ? `${d}d since ${n}` : null; })
                       .filter(Boolean).join(" · ")}
-                    bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.run : KIND_META.alcohol.hex }} />
+                    bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.alert : KIND_META.alcohol.hex }} />
             </div>
           </div>
         </div>
@@ -1128,7 +1134,7 @@ function Ledger({ days, daily, settings, onPick }) {
                 <td className="num" style={{ whiteSpace: "nowrap" }}>{x.sleep?.score ?? "—"}{x.sleep?.asleepMin ? ` · ${round(x.sleep.asleepMin / 60, 1)}h` : ""}</td>
                 <td className="num">{x.sleep?.bodyBattery ?? "—"}</td>
                 <td className="num" style={{ whiteSpace: "nowrap", color: "var(--soft)" }}>
-                  {[x.caf ? `${Math.round(x.caf)}mg` : null, x.alc ? `${round(x.alc, 1)} drk` : null, x.thc ? `${x.thc} thc` : null, x.nic ? `${x.nic} nic` : null].filter(Boolean).join(" · ") || "—"}
+                  {[x.caf ? `${Math.round(x.caf)}mg` : null, x.alc ? `${round(x.alc, 1)} drk` : null, x.thc ? `${x.thc} thc` : null, x.nic ? `${x.nic} nic` : null, x.stim ? `${round(x.stim, 1)} stim` : null].filter(Boolean).join(" · ") || "—"}
                 </td>
               </tr>
             ))}
@@ -1610,11 +1616,17 @@ function IntakeDash({ doses, sleep, sessions, days, settings }) {
                   sub={overCaf ? `${overCaf} day${overCaf === 1 ? "" : "s"} over ${settings.caffeineLimitMg} mg` : `never over ${settings.caffeineLimitMg} mg`} />
             <Stat v={round(sum(rows.map((r) => r.alc)), 1) ?? 0} l="drinks in 30 days" color={KIND_META.alcohol.hex}
                   sub={`${usedDays("alc")} drinking days · ${round(wkDrinks, 1)} of ${settings.drinksWeeklyLimit} this week`}
-                  bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.run : KIND_META.alcohol.hex }} />
+                  bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.alert : KIND_META.alcohol.hex }} />
             <Stat v={usedDays("thc")} l="cannabis days" color={KIND_META.cannabis.hex}
                   sub={`${daysSince(doses, "cannabis") ?? "—"}d since last · longest break ${longestClean("thc")}d`} />
             <Stat v={usedDays("nic")} l="nicotine days" color={KIND_META.nicotine.hex}
                   sub={`${daysSince(doses, "nicotine") ?? "—"}d since last · longest break ${longestClean("nic")}d`} />
+            {(usedDays("stim") > 0 || doses.some((d) => d.kind === "stimulant")) && (
+              <Stat v={usedDays("stim")} l="stimulant days" color={KIND_META.stimulant.hex}
+                    sub={`${daysSince(doses, "stimulant") ?? "—"}d since last · longest break ${longestClean("stim")}d`} />
+            )}
+            <Stat v={d30.filter((k) => { const x = daily.get(k); return !x.caf && !x.alc && !x.thc && !x.nic && !x.stim; }).length}
+                  l="days with nothing logged" color={HEX.lift} />
           </div>
         </div>
       </div>
@@ -1629,9 +1641,9 @@ function IntakeDash({ doses, sleep, sessions, days, settings }) {
                 <XAxis dataKey="label" tick={axisStyle} interval={5} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
                 <YAxis tick={axisStyle} tickLine={false} axisLine={false} />
                 <Tooltip content={<Tip fmt={(p) => `${p.value} mg`} />} />
-                <ReferenceLine y={settings.caffeineLimitMg} stroke={HEX.run} strokeDasharray="3 4" opacity={0.6} />
+                <ReferenceLine y={settings.caffeineLimitMg} stroke={HEX.alert} strokeDasharray="3 4" opacity={0.6} />
                 <Bar dataKey="caf" name="Caffeine" radius={[2, 2, 0, 0]}>
-                  {rows.map((r, i) => <Cell key={i} fill={r.caf > settings.caffeineLimitMg ? HEX.run : KIND_META.caffeine.hex} opacity={0.8} />)}
+                  {rows.map((r, i) => <Cell key={i} fill={r.caf > settings.caffeineLimitMg ? HEX.alert : KIND_META.caffeine.hex} opacity={0.8} />)}
                 </Bar>
               </BarChart>
             </Chart>
@@ -1646,9 +1658,9 @@ function IntakeDash({ doses, sleep, sessions, days, settings }) {
                 <XAxis dataKey="label" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#C7D1C6" }} />
                 <YAxis tick={axisStyle} tickLine={false} axisLine={false} allowDecimals={false} />
                 <Tooltip content={<Tip />} />
-                <ReferenceLine y={settings.drinksWeeklyLimit} stroke={HEX.run} strokeDasharray="3 4" opacity={0.6} />
+                <ReferenceLine y={settings.drinksWeeklyLimit} stroke={HEX.alert} strokeDasharray="3 4" opacity={0.6} />
                 <Bar dataKey="alc" name="Drinks" radius={[2, 2, 0, 0]}>
-                  {weeks.map((w, i) => <Cell key={i} fill={w.alc > settings.drinksWeeklyLimit ? HEX.run : KIND_META.alcohol.hex} opacity={0.8} />)}
+                  {weeks.map((w, i) => <Cell key={i} fill={w.alc > settings.drinksWeeklyLimit ? HEX.alert : KIND_META.alcohol.hex} opacity={0.8} />)}
                 </Bar>
               </BarChart>
             </Chart>
@@ -1813,12 +1825,12 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
   return (
     <>
       {!storageOk && (
-        <div className="panel" style={{ borderColor: "var(--run)" }}>
-          <h2 style={{ color: "var(--run)" }}>Not saving</h2>
+        <div className="panel" style={{ borderColor: "var(--alert)" }}>
+          <h2 style={{ color: "var(--alert)" }}>Not saving</h2>
           <div className="body">
             <p className="note">
               The app could not write to the database, so nothing you log will stick until this clears.
-              {store.lastError ? <><br /><b style={{ color: "var(--run)" }}>Reason: {store.lastError}</b></> : ""}
+              {store.lastError ? <><br /><b style={{ color: "var(--alert)" }}>Reason: {store.lastError}</b></> : ""}
               <br />Usually the fix is re-running supabase.sql in the Supabase SQL Editor (SETUP.md step 3.4), or re-copying the two codes into config.js (step 4).
             </p>
           </div>
@@ -1845,7 +1857,7 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
                     placeholder="…or paste the CSV contents here, header row included" />
           <div style={{ marginTop: 9, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button className="solid" onClick={() => text.trim() && ingest(text)}>Import</button>
-            {msg && <span className="note" style={{ color: msg.bad ? "var(--run)" : "var(--lift)" }}>{msg.text}</span>}
+            {msg && <span className="note" style={{ color: msg.bad ? "var(--alert)" : "var(--lift)" }}>{msg.text}</span>}
           </div>
           <div className="divline" />
           <p className="note">
@@ -1858,6 +1870,8 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
       </div>
 
       <StravaPanel />
+
+      <NotesImport doses={state.doses} setDoses={setDoses} days={state.days} setDays={setDays} settings={settings} />
 
       <div className="panel">
         <h2>Targets and units</h2>
@@ -1920,6 +1934,102 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
         </div>
       </div>
     </>
+  );
+}
+
+function NotesImport({ doses, setDoses, days, setDays, settings }) {
+  const [text, setText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [withNotes, setWithNotes] = useState(true);
+  const [done, setDone] = useState(null);
+
+  const look = () => {
+    setDone(null);
+    const r = parseNotes(text, toDayKey(new Date()));
+    if (!r.entries.length) { setPreview({ ...r, empty: true }); return; }
+    const have = new Set(doses.map((d) => d.id));
+    const fresh = r.entries.filter((e) => !have.has(e.id));
+    const byKind = KIND_ORDER.map((k) => ({ kind: k, n: fresh.filter((e) => e.kind === k).length })).filter((x) => x.n);
+    const dates = [...new Set(r.entries.map((e) => e.ts.slice(0, 10)))].sort();
+    setPreview({ ...r, fresh, byKind, dates, already: r.entries.length - fresh.length });
+  };
+
+  const bring = () => {
+    const incoming = preview.fresh.map(({ flagged, ...e }) => e);
+    setDoses(mergeBy(doses, incoming, (d) => d.id));
+    let noteCount = 0;
+    if (withNotes && preview.dayNotes.length) {
+      const add = preview.dayNotes.filter((n) => !days.find((d) => d.date === n.date)?.note);
+      noteCount = add.length;
+      setDays(add.reduce((acc, n) => mergeBy(acc, [{ date: n.date, note: n.note }], (d) => d.date), days));
+    }
+    setDone({ n: incoming.length, notes: noteCount });
+    setPreview(null); setText("");
+  };
+
+  return (
+    <div className="panel">
+      <h2>Import your notes <span className="hint">paste the whole file; anything already in is skipped</span></h2>
+      <div className="body">
+        <textarea rows={5} value={text} onChange={(e) => setText(e.target.value)}
+                  placeholder={"6/15:\n-1 espresso\n-1 zyn (6mg)\n-2 offfields (3mg)"} />
+        <div style={{ marginTop: 9, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="solid" onClick={look} disabled={!text.trim()}>Read it</button>
+          {done && <span className="note ok">Added {done.n} entr{done.n === 1 ? "y" : "ies"}{done.notes ? ` and ${done.notes} day note${done.notes === 1 ? "" : "s"}` : ""}.</span>}
+        </div>
+
+        {preview && preview.empty && <p className="note flag" style={{ marginTop: 10 }}>Nothing read. Dates need to look like <span className="pill">6/15:</span> with items under them starting with a dash.</p>}
+
+        {preview && !preview.empty && (
+          <>
+            <div className="divline" />
+            <p className="note" style={{ marginBottom: 8 }}>
+              <b>{preview.fresh.length} new</b> from {preview.dates.length} days, {preview.dates[0]} to {preview.dates[preview.dates.length - 1]}.
+              {preview.already ? ` ${preview.already} already in the log.` : ""}
+            </p>
+            <div className="chips" style={{ marginBottom: 10 }}>
+              {preview.byKind.map((k) => (
+                <span key={k.kind} className={`chip ${k.kind}`} style={{ cursor: "default" }}>
+                  <i className="dot" /><span className="lbl">{KIND_META[k.kind].name}</span><span className="amt">{k.n}</span>
+                </span>
+              ))}
+            </div>
+            {preview.fresh.some((e) => e.flagged) && (
+              <div style={{ marginBottom: 10 }}>
+                <p className="note" style={{ marginBottom: 4 }}>
+                  Estimated, because the note did not say exactly. Import anyway and correct them on the Log tab:
+                </p>
+                <table>
+                  <tbody>
+                    {preview.fresh.filter((e) => e.flagged).slice(0, 12).map((e) => (
+                      <tr key={e.id}>
+                        <td style={{ width: 86, color: "var(--soft)" }}>{fmtShort(e.ts.slice(0, 10))}</td>
+                        <td>{e.label}</td>
+                        <td className="num">{e.amount} {e.unit}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {preview.unread.length > 0 && (
+              <p className="note flag" style={{ marginBottom: 10 }}>
+                Skipped {preview.unread.length} line{preview.unread.length === 1 ? "" : "s"} it could not read:
+                {" "}{preview.unread.slice(0, 5).map((u) => u.text).join(" · ")}{preview.unread.length > 5 ? " …" : ""}
+              </p>
+            )}
+            <label className="note" style={{ display: "flex", gap: 7, alignItems: "center", marginBottom: 10 }}>
+              <input type="checkbox" checked={withNotes} onChange={(e) => setWithNotes(e.target.checked)} style={{ width: "auto" }} />
+              Also use the text after each date as that day's note ({preview.dayNotes.length} found)
+            </label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="solid" onClick={bring} disabled={!preview.fresh.length}>Import {preview.fresh.length} entries</button>
+              <button className="ghost" onClick={() => setPreview(null)}>Cancel</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2008,7 +2118,7 @@ function StravaPanel() {
             </p>
           </>
         )}
-        {msg && <p className="note" style={{ marginTop: 10, color: msg.bad ? "var(--run)" : "var(--lift)" }}>{msg.text}</p>}
+        {msg && <p className="note" style={{ marginTop: 10, color: msg.bad ? "var(--alert)" : "var(--lift)" }}>{msg.text}</p>}
       </div>
     </div>
   );
@@ -2130,6 +2240,9 @@ function withDefaults(st) {
       .filter((p) => !["c5", "w6", "w2"].includes(p.id))
       .map((p) => (p.id === "w1" ? { ...p, label: "Edible", amount: p.amount || 10, ask: true }
         : p.id === "n1" ? { ...p, ask: true } : p));
+    if (!s.presets.some((p) => p.kind === "stimulant")) {
+      s.presets = [...s.presets, ...DEFAULT_SETTINGS.presets.filter((p) => p.kind === "stimulant")];
+    }
   }
   return s;
 }

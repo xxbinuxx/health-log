@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS = {
   sleepScoreGoal: 80,
   sleepHoursGoal: 7.5,
   stepsGoal: 8000,
+  theme: "light",
   dayTags: ["normal", "social", "date", "travel", "work late", "sick", "family"],
   race: { name: "", date: "", goalTime: "" },
   presets: [
@@ -54,17 +55,46 @@ const DEFAULT_SETTINGS = {
 };
 
 const KIND_META = {
-  caffeine: { color: "var(--caf)", name: "Caffeine", hex: "#E69F00" },
-  alcohol: { color: "var(--alc)", name: "Alcohol", hex: "#0072B2" },
-  cannabis: { color: "var(--thc)", name: "Cannabis", hex: "#009E73" },
-  nicotine: { color: "var(--nic)", name: "Nicotine", hex: "#4D4D4D" },
-  stimulant: { color: "var(--stim)", name: "Adderall", hex: "#CC79A7" },
+  caffeine: { color: "var(--caf)", name: "Caffeine" },
+  alcohol: { color: "var(--alc)", name: "Alcohol" },
+  cannabis: { color: "var(--thc)", name: "Cannabis" },
+  nicotine: { color: "var(--nic)", name: "Nicotine" },
+  stimulant: { color: "var(--stim)", name: "Adderall" },
 };
 const KIND_ORDER = ["caffeine", "alcohol", "cannabis", "nicotine", "stimulant"];
 
 const RUN_TYPES = ["easy", "long", "tempo", "intervals", "race", "trail"];
 const LIFT_TYPES = ["push", "pull", "legs", "upper", "lower", "full body"];
-const HEX = { run: "#009E73", lift: "#E69F00", sleep: "#0072B2", rest: "#767676", rhr: "#CC79A7", hours: "#56B4E9", alert: "#D55E00" };
+/* Three palettes. Light and dark use Okabe-Ito hues; high contrast goes neon on black.
+   All three keep blue / green / magenta apart, which survives every common colour blindness. */
+const PALETTES = {
+  light: {
+    paper: "#EEF2F7", card: "#FFFFFF", ink: "#0D1B30", soft: "#3D5171", faint: "#6B7F9B",
+    rule: "#B9CADC", ruleSoft: "#DCE5EF", grid: "#DCE5EF", axis: "#3D5171", field: "#FFFFFF", head: "#F7FAFD",
+    navy: "#12345E", sleep: "#0072B2", run: "#009E73", lift: "#E69F00", rest: "#767676",
+    alert: "#D55E00", rhr: "#CC79A7", hours: "#56B4E9",
+    caf: "#E69F00", alc: "#0072B2", thc: "#009E73", nic: "#4D4D4D", stim: "#CC79A7",
+  },
+  dark: {
+    paper: "#0F1621", card: "#18212F", ink: "#E8EFF7", soft: "#A6B4C6", faint: "#7B8A9D",
+    rule: "#2E3C50", ruleSoft: "#222D3E", grid: "#222D3E", axis: "#A6B4C6", field: "#101A27", head: "#1D2735",
+    navy: "#7FB3FF", sleep: "#58A6FF", run: "#3DDC97", lift: "#F5B841", rest: "#8B98A9",
+    alert: "#FF8A5B", rhr: "#E58FBF", hours: "#7FD3F7",
+    caf: "#F5B841", alc: "#58A6FF", thc: "#3DDC97", nic: "#A6B4C6", stim: "#E58FBF",
+  },
+  contrast: {
+    paper: "#000000", card: "#000000", ink: "#FFFFFF", soft: "#E6E6E6", faint: "#BDBDBD",
+    rule: "#FFFFFF", ruleSoft: "#454545", grid: "#454545", axis: "#FFFFFF", field: "#000000", head: "#0D0D0D",
+    navy: "#00D5FF", sleep: "#00D5FF", run: "#00FF85", lift: "#FFFFFF", rest: "#9E9E9E",
+    alert: "#FF3CAC", rhr: "#FF3CAC", hours: "#7DF9FF",
+    caf: "#FFE600", alc: "#00D5FF", thc: "#00FF85", nic: "#FFFFFF", stim: "#FF3CAC",
+  },
+};
+const THEMES = [["light", "Light"], ["dark", "Dark"], ["contrast", "Contrast"]];
+let CURRENT_THEME = "light";
+// charts read plain JS colours, so this stays in step with whichever theme is on
+const HEX = new Proxy({}, { get: (_t, k) => PALETTES[CURRENT_THEME][k] });
+const kindHex = (kind) => HEX[{ caffeine: "caf", alcohol: "alc", cannabis: "thc", nicotine: "nic", stimulant: "stim" }[kind]];
 
 /* ================================================================== */
 /* helpers                                                            */
@@ -405,13 +435,26 @@ function mergeBy(existing, incoming, keyFn) {
 /* ================================================================== */
 
 const CSS = `
-.hl {
+/* Okabe-Ito hues in light and dark; neon on black for contrast mode. */
+.hl.t-light {
   --paper:#EEF2F7; --card:#FFFFFF; --ink:#0D1B30; --soft:#3D5171; --faint:#6B7F9B;
-  --rule:#B9CADC; --rule-soft:#DCE5EF;
-  --navy:#12345E;
-  /* Okabe-Ito: distinguishable under every common form of colour blindness */
-  --sleep:#0072B2; --run:#009E73; --lift:#E69F00; --rest:#767676; --alert:#D55E00;
+  --rule:#B9CADC; --rule-soft:#DCE5EF; --field:#FFFFFF; --head:#F7FAFD;
+  --navy:#12345E; --sleep:#0072B2; --run:#009E73; --lift:#E69F00; --rest:#767676; --alert:#D55E00;
   --caf:#E69F00; --alc:#0072B2; --thc:#009E73; --nic:#4D4D4D; --stim:#CC79A7;
+}
+.hl.t-dark {
+  --paper:#0F1621; --card:#18212F; --ink:#E8EFF7; --soft:#A6B4C6; --faint:#7B8A9D;
+  --rule:#2E3C50; --rule-soft:#222D3E; --field:#101A27; --head:#1D2735;
+  --navy:#7FB3FF; --sleep:#58A6FF; --run:#3DDC97; --lift:#F5B841; --rest:#8B98A9; --alert:#FF8A5B;
+  --caf:#F5B841; --alc:#58A6FF; --thc:#3DDC97; --nic:#A6B4C6; --stim:#E58FBF;
+}
+.hl.t-contrast {
+  --paper:#000000; --card:#000000; --ink:#FFFFFF; --soft:#E6E6E6; --faint:#BDBDBD;
+  --rule:#FFFFFF; --rule-soft:#454545; --field:#000000; --head:#0D0D0D;
+  --navy:#00D5FF; --sleep:#00D5FF; --run:#00FF85; --lift:#FFFFFF; --rest:#9E9E9E; --alert:#FF3CAC;
+  --caf:#FFE600; --alc:#00D5FF; --thc:#00FF85; --nic:#FFFFFF; --stim:#FF3CAC;
+}
+.hl {
   background:var(--paper); color:var(--ink); min-height:100vh;
   font-family:Aptos,"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
   font-size:14px; line-height:1.45; font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased;
@@ -433,7 +476,7 @@ const CSS = `
 .hl .panel{background:var(--card);border:1px solid var(--rule);margin-bottom:14px;}
 .hl .panel{border-radius:3px;}
 .hl .panel > h2{margin:0;padding:9px 14px;font-size:12.5px;font-weight:600;color:var(--navy);
-  background:#F7FAFD;border-bottom:1px solid var(--rule-soft);display:flex;justify-content:space-between;align-items:center;gap:10px;}
+  background:var(--head);border-bottom:1px solid var(--rule-soft);display:flex;justify-content:space-between;align-items:center;gap:10px;}
 .hl .panel > h2 .hint{font-weight:400;color:var(--faint);}
 .hl .panel .body{padding:14px;}
 .hl .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
@@ -453,7 +496,7 @@ const CSS = `
 .hl button.ghost:hover:not(:disabled){border-color:var(--ink);color:var(--ink);}
 .hl button.ghost:disabled{opacity:.4;cursor:default;}
 .hl .chips{display:flex;flex-wrap:wrap;gap:6px;}
-.hl .chip{border:1px solid var(--rule);background:#fff;border-radius:2px;padding:6px 10px;
+.hl .chip{border:1px solid var(--rule);background:var(--field);border-radius:2px;padding:6px 10px;
   font:inherit;font-size:12.5px;cursor:pointer;display:flex;align-items:center;gap:7px;transition:transform .08s ease;}
 .hl .chip:hover{border-color:currentColor;}
 .hl .chip:active{transform:scale(.96);}
@@ -464,17 +507,17 @@ const CSS = `
 .hl .chip.cannabis{color:var(--thc);} .hl .chip.nicotine{color:var(--nic);} .hl .chip.stimulant{color:var(--stim);}
 .hl .chip[aria-pressed="true"]{border-color:currentColor;background:var(--paper);}
 .hl .seg{display:inline-flex;border:1px solid var(--rule);border-radius:2px;overflow:hidden;}
-.hl .seg button{background:#fff;border:none;border-right:1px solid var(--rule);padding:6px 14px;font:inherit;
+.hl .seg button{background:var(--field);border:none;border-right:1px solid var(--rule);padding:6px 14px;font:inherit;
   font-size:13px;color:var(--soft);cursor:pointer;}
 .hl .seg button:last-child{border-right:none;}
-.hl .seg button[aria-pressed="true"]{background:var(--navy);color:#fff;}
+.hl .seg button[aria-pressed="true"]{background:var(--navy);color:var(--paper);font-weight:600;}
 .hl .seg button.run[aria-pressed="true"]{background:var(--run);}
 .hl .seg button.lift[aria-pressed="true"]{background:var(--lift);}
 .hl .seg button.rest[aria-pressed="true"]{background:var(--soft);}
-.hl .tchip{border:1px solid var(--rule);background:#fff;border-radius:14px;padding:4px 11px;font:inherit;
+.hl .tchip{border:1px solid var(--rule);background:var(--field);border-radius:14px;padding:4px 11px;font:inherit;
   font-size:12.5px;color:var(--soft);cursor:pointer;}
 .hl .tchip[aria-pressed="true"]{border-color:currentColor;color:var(--ink);background:var(--paper);}
-.hl .tag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;color:#fff;line-height:1.5;}
+.hl .tag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;color:var(--paper);line-height:1.5;}
 .hl .tag.run{background:var(--run);} .hl .tag.lift{background:var(--lift);} .hl .tag.rest{background:var(--rest);}
 .hl .done{display:flex;gap:14px;font-size:12px;color:var(--soft);}
 .hl .done span::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;
@@ -489,14 +532,15 @@ const CSS = `
 .hl .del{background:none;border:none;color:var(--faint);cursor:pointer;font:inherit;font-size:14px;line-height:1;padding:0 2px;}
 .hl .del:hover{color:var(--alert);}
 .hl input,.hl select,.hl textarea{font:inherit;font-size:13px;padding:5px 7px;border:1px solid var(--rule);
-  background:#fff;color:var(--ink);border-radius:2px;width:100%;}
+  background:var(--field);color:var(--ink);border-radius:2px;width:100%;}
+.hl input::placeholder,.hl textarea::placeholder{color:var(--faint);}
 .hl input:focus,.hl select:focus,.hl textarea:focus{outline:2px solid var(--sleep);outline-offset:-1px;}
 .hl input.big{font-size:21px;font-weight:600;letter-spacing:-0.01em;padding:6px 8px;}
 .hl label.f{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--soft);}
 .hl .row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;}
-.hl button.solid{background:var(--navy);color:#fff;border:none;padding:7px 14px;font:inherit;
+.hl button.solid{background:var(--navy);color:var(--paper);border:none;padding:7px 14px;font:inherit;
   font-size:13px;font-weight:500;cursor:pointer;border-radius:3px;}
-.hl button.solid:hover{background:#15305A;}
+.hl button.solid:hover{filter:brightness(1.15);}
 .hl button.solid:disabled{opacity:.4;cursor:default;background:var(--navy);}
 .hl button.danger{border:1px solid var(--alert);color:var(--alert);background:none;padding:6px 12px;
   font:inherit;font-size:12.5px;cursor:pointer;border-radius:2px;}
@@ -516,8 +560,15 @@ const CSS = `
 .hl .rangebar{display:flex;justify-content:flex-end;margin:-6px 0 14px;}
 .hl .rangebar .seg button{padding:5px 12px;font-size:12.5px;}
 @media(max-width:600px){.hl .rangebar{justify-content:stretch;} .hl .rangebar .seg{display:flex;width:100%;} .hl .rangebar .seg button{flex:1;padding:6px 4px;}}
-.hl .rc-tip{background:#fff;border:1px solid var(--rule);padding:6px 9px;font-size:12px;color:var(--ink);}
+.hl .rc-tip{background:var(--card);border:1px solid var(--rule);padding:6px 9px;font-size:12px;color:var(--ink);}
 .hl .rc-tip b{display:block;color:var(--soft);font-weight:500;margin-bottom:2px;}
+.hl.t-contrast .panel{border-width:2px;}
+.hl.t-contrast .panel > h2{border-bottom-width:2px;}
+.hl.t-contrast .stat .v{font-weight:700;}
+.hl.t-contrast .legend{color:var(--ink);}
+.hl.t-contrast button.ghost{border-width:2px;color:var(--ink);}
+.hl .themepick{display:flex;gap:8px;align-items:center;justify-content:flex-end;}
+.hl .themepick .seg button{padding:3px 9px;font-size:11.5px;}
 @media (prefers-reduced-motion:reduce){.hl *{transition:none!important;}}
 `;
 
@@ -552,8 +603,7 @@ function Tip({ active, payload, label, fmt }) {
   );
 }
 
-const axisStyle = { fontSize: 11, fill: "#3D5171" };
-const gridStroke = "#DCE5EF";
+const axisTick = () => ({ fontSize: 11, fill: HEX.axis });
 
 function Chart({ h = 180, children }) {
   return <div style={{ width: "100%", height: h }}><ResponsiveContainer>{children}</ResponsiveContainer></div>;
@@ -1189,14 +1239,14 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
           <h2>Intake <span className="hint">7-day average and this week</span></h2>
           <div className="body">
             <div className="grid2" style={{ gap: 12 }}>
-              <Stat v={Math.round(cafAvg7 ?? 0)} l="mg caffeine / day" color={KIND_META.caffeine.hex}
+              <Stat v={Math.round(cafAvg7 ?? 0)} l="mg caffeine / day" color={kindHex("caffeine")}
                     sub={cafAvg30 != null ? `${Math.round(cafAvg30)} over 30d` : ""}
-                    bar={{ pct: ((cafAvg7 ?? 0) / settings.caffeineLimitMg) * 100, color: (cafAvg7 ?? 0) > settings.caffeineLimitMg ? HEX.alert : KIND_META.caffeine.hex }} />
-              <Stat v={round(wkDrinks, 1) ?? 0} l={`drinks of ${settings.drinksWeeklyLimit}`} color={KIND_META.alcohol.hex}
+                    bar={{ pct: ((cafAvg7 ?? 0) / settings.caffeineLimitMg) * 100, color: (cafAvg7 ?? 0) > settings.caffeineLimitMg ? HEX.alert : kindHex("caffeine") }} />
+              <Stat v={round(wkDrinks, 1) ?? 0} l={`drinks of ${settings.drinksWeeklyLimit}`} color={kindHex("alcohol")}
                     sub={[["alcohol", "drink"], ["cannabis", "cannabis"], ["nicotine", "nicotine"], ["stimulant", "adderall"]]
                       .map(([k, n]) => { const d = daysSince(doses, k); return d != null ? `${d}d since ${n}` : null; })
                       .filter(Boolean).join(" · ")}
-                    bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.alert : KIND_META.alcohol.hex }} />
+                    bar={{ pct: (wkDrinks / settings.drinksWeeklyLimit) * 100, color: wkDrinks > settings.drinksWeeklyLimit ? HEX.alert : kindHex("alcohol") }} />
             </div>
           </div>
         </div>
@@ -1213,10 +1263,10 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
         <div className="body" style={{ paddingTop: 8 }}>
           <Chart h={210}>
             <ComposedChart data={trend} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-              <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(trend.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
-              <YAxis yAxisId="score" domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
-              <YAxis yAxisId="run" orientation="right" tick={axisStyle} tickLine={false} axisLine={false} />
+              <CartesianGrid stroke={HEX.grid} vertical={false} />
+              <XAxis dataKey="label" tick={axisTick()} interval={tickGap(trend.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+              <YAxis yAxisId="score" domain={[40, 100]} tick={axisTick()} tickLine={false} axisLine={false} />
+              <YAxis yAxisId="run" orientation="right" tick={axisTick()} tickLine={false} axisLine={false} />
               <Tooltip content={<Tip fmt={(p) => p.dataKey === "run" ? `${p.value} ${u}` : p.value} />} />
               <Bar yAxisId="run" dataKey="run" name="Run" fill={HEX.run} opacity={0.75} radius={[2, 2, 0, 0]} />
               <Line yAxisId="score" type="monotone" dataKey="score" name="Sleep score" stroke={HEX.sleep} strokeWidth={2} dot={{ r: 2.5 }} connectNulls />
@@ -1300,9 +1350,9 @@ function ScoreLines({ chart, keys, band, range, h = 220 }) {
   return (
     <Chart h={h}>
       <LineChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-        <CartesianGrid stroke={gridStroke} vertical={false} />
-        <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
-        <YAxis domain={[0, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
+        <CartesianGrid stroke={HEX.grid} vertical={false} />
+        <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+        <YAxis domain={[0, 100]} tick={axisTick()} tickLine={false} axisLine={false} />
         <Tooltip content={<Tip />} />
         {keys.map((k) => (band?.[k] ? (
           <ReferenceLine key={`med-${k}`} y={band[k].median} stroke={SCORES[k].color} strokeDasharray="3 4" opacity={0.5} />
@@ -1382,7 +1432,7 @@ function RunVsState({ daily, sessions, settings, range }) {
   const [lag, setLag] = useState(1);
   const u = settings.distanceUnit;
 
-  const { pts, buckets, r } = useMemo(() => {
+  const { pts, buckets, r, yMode, skipped } = useMemo(() => {
     const span = lastNDays(range, today);
     const raw = buildIndices(daily, span, settings);
     // Both axes use the same window-relative scale as the score cards, so 50 is your
@@ -1405,15 +1455,19 @@ function RunVsState({ daily, sessions, settings, range }) {
     const medByType = new Map([...byType].map(([t, v]) => [t, median(v)]));
 
     const out = [];
+    const skip = { noDist: 0, noState: 0, noPace: 0 };
     for (const s of sessions) {
-      if (s.kind !== "run" || !s.distanceKm) continue;
+      if (s.kind !== "run") continue;
+      if (!s.distanceKm) { skip.noDist++; continue; }
       const state = idx.get(addDays(s.date, -(lag - 1)));      // lag 1 = the morning of the run
-      if (!state || state.degen == null || state.regen == null) continue;
+      // Regen needs sleep entries, which may not reach as far back as the runs do, so it is optional
+      if (!state || state.degen == null) { skip.noState++; continue; }
+      if (!paceSecOf(s, "km")) skip.noPace++;
       const p = paceSecOf(s, "km");
       const med = medByType.get(s.type);
       const rel = p && med ? (med - p) / med : null;            // + = faster than usual for the type
       out.push({
-        degen: state.degen, regen: state.regen,
+        degen: state.degen, regen: state.regen ?? null,
         degenRaw: state.degenRaw, regenRaw: state.regenRaw,
         dist: round(toUnit(s.distanceKm, u), 1), z: round(toUnit(s.distanceKm, u), 1),
         rel, date: s.date, type: s.type,
@@ -1432,7 +1486,13 @@ function RunVsState({ daily, sessions, settings, range }) {
       };
     });
     const withPace = out.filter((o) => o.rel != null);
-    return { pts: out, buckets: bk, r: pearson(withPace.map((o) => o.degen), withPace.map((o) => o.rel)) };
+    // Until there is real sleep history the vertical axis shows distance instead of Regen
+    const mode = out.filter((o) => o.regen != null).length >= 8 ? "regen" : "dist";
+    return {
+      pts: mode === "regen" ? out.filter((o) => o.regen != null) : out,
+      buckets: bk, yMode: mode, skipped: skip,
+      r: pearson(withPace.map((o) => o.degen), withPace.map((o) => o.rel)),
+    };
   }, [daily, sessions, settings, range, lag, u, today]);
 
   // colour and shape both carry the pace: up-triangle faster, square typical, down-triangle slower
@@ -1453,7 +1513,7 @@ function RunVsState({ daily, sessions, settings, range }) {
 
   return (
     <div className="panel">
-      <h2>Runs against the state you were in
+      <h2>{yMode === "regen" ? "Runs against the state you were in" : "Runs against how heavy the days were"}
         <span className="seg" style={{ fontSize: 12 }}>
           {[[1, "same morning"], [2, "next day"], [3, "two days later"]].map(([v, name]) => (
             <button key={v} aria-pressed={lag === v} onClick={() => setLag(v)} style={{ padding: "3px 9px", fontSize: 12 }}>{name}</button>
@@ -1462,21 +1522,32 @@ function RunVsState({ daily, sessions, settings, range }) {
       </h2>
       <div className="body" style={{ paddingTop: 8 }}>
         {pts.length < 3 ? (
-          <p className="empty">Needs a few more runs with pace in this range. Widen the range or import more history from Strava.</p>
+          <p className="empty">
+            Not enough to plot in this range yet.
+            {skipped.noState > 0 && ` ${skipped.noState} run${skipped.noState === 1 ? "" : "s"} fall on days with no intake logged, so there is no Degen score to place them against.`}
+            {skipped.noDist > 0 && ` ${skipped.noDist} have no distance.`}
+            {" "}Widen the range, or fill in intake on the Log tab for the days you ran.
+          </p>
         ) : (
           <>
             <Chart h={300}>
               <ScatterChart margin={{ top: 10, right: 12, left: -12, bottom: 4 }}>
-                <CartesianGrid stroke={gridStroke} />
-                <XAxis type="number" dataKey="degen" name="Degen" domain={[0, 100]} tick={axisStyle}
-                       tickLine={false} axisLine={{ stroke: "#B9CADC" }}
-                       label={{ value: "Degen, vs your median →", position: "insideBottomRight", offset: -2, fill: "#8598B2", fontSize: 11 }} />
-                <YAxis type="number" dataKey="regen" name="Regen" domain={[0, 100]} tick={axisStyle}
-                       tickLine={false} axisLine={false}
-                       label={{ value: "Regen, vs your median →", angle: -90, position: "insideLeft", offset: 18, fill: "#8598B2", fontSize: 11 }} />
+                <CartesianGrid stroke={HEX.grid} />
+                <XAxis type="number" dataKey="degen" name="Degen" domain={[0, 100]} tick={axisTick()}
+                       tickLine={false} axisLine={{ stroke: HEX.rule }}
+                       label={{ value: "Degen, vs your median →", position: "insideBottomRight", offset: -2, fill: HEX.axis, fontSize: 11 }} />
+                {yMode === "regen" ? (
+                  <YAxis type="number" dataKey="regen" name="Regen" domain={[0, 100]} tick={axisTick()}
+                         tickLine={false} axisLine={false}
+                         label={{ value: "Regen, vs your median →", angle: -90, position: "insideLeft", offset: 18, fill: HEX.axis, fontSize: 11 }} />
+                ) : (
+                  <YAxis type="number" dataKey="dist" name="Distance" tick={axisTick()}
+                         tickLine={false} axisLine={false}
+                         label={{ value: `${u} →`, angle: -90, position: "insideLeft", offset: 22, fill: HEX.axis, fontSize: 11 }} />
+                )}
                 <ZAxis type="number" dataKey="z" range={[40, 420]} />
-                <ReferenceLine x={50} stroke="#B9CADC" />
-                <ReferenceLine y={50} stroke="#B9CADC" />
+                <ReferenceLine x={50} stroke={HEX.rule} />
+                {yMode === "regen" && <ReferenceLine y={50} stroke={HEX.rule} />}
                 <Tooltip content={({ active, payload }) => {
                   if (!active || !payload?.length) return null;
                   const d = payload[0].payload;
@@ -1484,7 +1555,10 @@ function RunVsState({ daily, sessions, settings, range }) {
                     <div className="rc-tip">
                       <b>{fmtDayLabel(d.date)}</b>
                       <div>{d.dist} {u} {d.type}{d.pace ? ` at ${d.pace}/${u}` : ""}</div>
-                      <div>Regen {Math.round(d.regen)} · Degen {Math.round(d.degen)} <span style={{ color: "var(--faint)" }}>(raw {Math.round(d.regenRaw)} / {Math.round(d.degenRaw)})</span></div>
+                      <div>
+                        Degen {Math.round(d.degen)}{d.regen != null ? ` · Regen ${Math.round(d.regen)}` : ""}
+                        <span style={{ color: "var(--faint)" }}> (raw {Math.round(d.degenRaw)}{d.regenRaw != null ? ` / ${Math.round(d.regenRaw)}` : ""})</span>
+                      </div>
                       {d.rel != null && <div>{d.rel >= 0 ? "faster" : "slower"} than your usual {d.type} pace by {Math.abs(round(d.rel * 100, 1))}%</div>}
                     </div>
                   );
@@ -1499,7 +1573,9 @@ function RunVsState({ daily, sessions, settings, range }) {
               <span><i style={{ background: HEX.run, clipPath: "polygon(50% 0, 100% 100%, 0 100%)" }} />▲ faster than usual for that run type</span>
               <span><i style={{ background: HEX.rest }} />■ about usual</span>
               <span><i style={{ background: HEX.alert, clipPath: "polygon(0 0, 100% 0, 50% 100%)" }} />▼ slower</span>
-              <span>both axes are relative to your own median for the range, so 50 is a typical day</span>
+              <span>{yMode === "regen"
+                ? "both axes are relative to your own median for the range, so 50 is a typical day"
+                : "Degen is relative to your median; the vertical axis stays on distance until eight or more nights of sleep are logged in this range"}</span>
             </div>
             <div className="divline" />
             <table>
@@ -1564,8 +1640,8 @@ function DegenRidges({ daily, settings, range }) {
             <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="Degen distribution by weekday">
               {[0, 25, 50, 75, 100].map((g) => (
                 <g key={g}>
-                  <line x1={x(g / 2)} x2={x(g / 2)} y1={10} y2={padT + (rows.length - 1) * rowH + 6} stroke="#DCE5EF" />
-                  <text x={x(g / 2)} y={H - 6} fontSize="10" fill="#6B7F9B" textAnchor="middle">{g}</text>
+                  <line x1={x(g / 2)} x2={x(g / 2)} y1={10} y2={padT + (rows.length - 1) * rowH + 6} stroke={HEX.grid} />
+                  <text x={x(g / 2)} y={H - 6} fontSize="10" fill={HEX.axis} textAnchor="middle">{g}</text>
                 </g>
               ))}
               {rows.map((r, ri) => {
@@ -1575,7 +1651,7 @@ function DegenRidges({ daily, settings, range }) {
                 const weekend = r.day === "Fri" || r.day === "Sat";
                 return (
                   <g key={r.day}>
-                    <line x1={padL} x2={padL + iw} y1={base} y2={base} stroke="#DCE5EF" />
+                    <line x1={padL} x2={padL + iw} y1={base} y2={base} stroke={HEX.grid} />
                     {r.n > 0 && (
                       <>
                         <path d={`${path} L${x(50)},${base} L${padL},${base} Z`} fill={weekend ? HEX.alert : HEX.sleep} opacity={weekend ? 0.28 : 0.16} />
@@ -1584,8 +1660,8 @@ function DegenRidges({ daily, settings, range }) {
                         {r.med != null && <circle cx={x(r.med / 2)} cy={base} r="2.8" fill={weekend ? HEX.alert : HEX.sleep} />}
                       </>
                     )}
-                    <text x={padL - 8} y={base - 2} fontSize="11" fill="#4A5E7E" textAnchor="end">{r.day}</text>
-                    <text x={padL + iw + 8} y={base - 2} fontSize="10.5" fill="#6B7F9B">
+                    <text x={padL - 8} y={base - 2} fontSize="11" fill={HEX.soft} textAnchor="end">{r.day}</text>
+                    <text x={padL + iw + 8} y={base - 2} fontSize="10.5" fill={HEX.axis}>
                       {r.n ? `${r.med} · ${r.n}d` : "—"}
                     </text>
                   </g>
@@ -1656,8 +1732,8 @@ function FortnightStrip({ days, daily, settings, onPick }) {
       <h2>Fourteen days <span className="hint">tap a day to open it in the log</span></h2>
       <div className="body" style={{ paddingTop: 6 }}>
         <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="Fourteen-day summary">
-          <line x1={0} x2={W} y1={barTop + barH} y2={barTop + barH} stroke="#B9CADC" />
-          <line x1={0} x2={W} y1={barTop + barH - (settings.sleepScoreGoal / 100) * barH} y2={barTop + barH - (settings.sleepScoreGoal / 100) * barH} stroke="#33507C" strokeDasharray="3 4" opacity={0.5} />
+          <line x1={0} x2={W} y1={barTop + barH} y2={barTop + barH} stroke={HEX.rule} />
+          <line x1={0} x2={W} y1={barTop + barH - (settings.sleepScoreGoal / 100) * barH} y2={barTop + barH - (settings.sleepScoreGoal / 100) * barH} stroke={HEX.sleep} strokeDasharray="3 4" opacity={0.5} />
           {days.map((k, i) => {
             const x = daily.get(k); const cx = i * colW + colW / 2;
             const score = x.sleep?.score;
@@ -1667,29 +1743,29 @@ function FortnightStrip({ days, daily, settings, onPick }) {
             const dow = fromDayKey(k).toLocaleDateString(undefined, { weekday: "narrow" });
             return (
               <g key={k} onClick={() => onPick(k)} style={{ cursor: "pointer" }}>
-                <rect x={i * colW} y={0} width={colW} height={H} fill={k === today ? "#33507C" : "transparent"} opacity={0.05} />
+                <rect x={i * colW} y={0} width={colW} height={H} fill={k === today ? HEX.sleep : "transparent"} opacity={0.05} />
                 {score != null ? (
                   <>
                     <rect x={cx - 14} y={barTop + barH - h} width={28} height={h} fill={HEX.sleep} opacity={score >= settings.sleepScoreGoal ? 0.9 : 0.5} />
-                    <text x={cx} y={barTop + barH - h - 4} fontSize="10.5" fill="#33507C" textAnchor="middle">{score}</text>
+                    <text x={cx} y={barTop + barH - h - 4} fontSize="10.5" fill={HEX.sleep} textAnchor="middle">{score}</text>
                   </>
                 ) : (
-                  <text x={cx} y={barTop + barH - 4} fontSize="10" fill="#B9CADC" textAnchor="middle">·</text>
+                  <text x={cx} y={barTop + barH - 4} fontSize="10" fill={HEX.faint} textAnchor="middle">·</text>
                 )}
                 {tag && (
                   <>
                     <rect x={cx - 20} y={tagY - 10} width={40} height={16} rx={8}
-                          fill={tag === "run" ? HEX.run : tag === "lift" ? HEX.lift : tag === "both" ? "#6B4A3A" : "#B9CADC"} />
-                    <text x={cx} y={tagY + 2} fontSize="9.5" fill={tag === "rest" ? "#5C6B61" : "#fff"} textAnchor="middle">{tag}</text>
+                          fill={tag === "run" ? HEX.run : tag === "lift" ? HEX.lift : tag === "both" ? HEX.lift : "#B9CADC"} />
+                    <text x={cx} y={tagY + 2} fontSize="9.5" fill={tag === "rest" ? HEX.ink : HEX.card} textAnchor="middle">{tag}</text>
                   </>
                 )}
                 {dots.map((d, j) => (
-                  <circle key={d.id} cx={cx - ((dots.length - 1) * 4) + j * 8} cy={dotsY} r={3} fill={KIND_META[d.kind]?.hex || "#999"} />
+                  <circle key={d.id} cx={cx - ((dots.length - 1) * 4) + j * 8} cy={dotsY} r={3} fill={kindHex(d.kind) || HEX.rest} />
                 ))}
                 {x.tags.length > 0 && x.tags[0] !== "normal" && (
-                  <text x={cx} y={dayTagY} fontSize="9.5" fill="#33507C" textAnchor="middle">{x.tags[0]}{x.tags.length > 1 ? " +" : ""}</text>
+                  <text x={cx} y={dayTagY} fontSize="9.5" fill={HEX.sleep} textAnchor="middle">{x.tags[0]}{x.tags.length > 1 ? " +" : ""}</text>
                 )}
-                <text x={cx} y={H - 4} fontSize="10" fill={k === today ? "#17211C" : "#8A978D"} textAnchor="middle">
+                <text x={cx} y={H - 4} fontSize="10" fill={k === today ? HEX.ink : HEX.faint} textAnchor="middle">
                   {dow} {fromDayKey(k).getDate()}
                 </text>
               </g>
@@ -1700,10 +1776,10 @@ function FortnightStrip({ days, daily, settings, onPick }) {
           <span><i style={{ background: HEX.sleep }} />sleep score (dashed line = goal {settings.sleepScoreGoal})</span>
           <span><i style={{ background: HEX.run }} />run</span>
           <span><i style={{ background: HEX.lift }} />lift</span>
-          <span><i style={{ background: KIND_META.caffeine.hex }} />caffeine</span>
-          <span><i style={{ background: KIND_META.alcohol.hex }} />alcohol</span>
-          <span><i style={{ background: KIND_META.cannabis.hex }} />cannabis</span>
-          <span><i style={{ background: KIND_META.nicotine.hex }} />nicotine</span>
+          <span><i style={{ background: kindHex("caffeine") }} />caffeine</span>
+          <span><i style={{ background: kindHex("alcohol") }} />alcohol</span>
+          <span><i style={{ background: kindHex("cannabis") }} />cannabis</span>
+          <span><i style={{ background: kindHex("nicotine") }} />nicotine</span>
         </div>
       </div>
     </div>
@@ -1799,10 +1875,10 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
         <div className="body" style={{ paddingTop: 8 }}>
           <Chart h={220}>
             <ComposedChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-              <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
-              <YAxis yAxisId="score" domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
-              <YAxis yAxisId="hours" orientation="right" domain={[0, 10]} tick={axisStyle} tickLine={false} axisLine={false} />
+              <CartesianGrid stroke={HEX.grid} vertical={false} />
+              <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+              <YAxis yAxisId="score" domain={[40, 100]} tick={axisTick()} tickLine={false} axisLine={false} />
+              <YAxis yAxisId="hours" orientation="right" domain={[0, 10]} tick={axisTick()} tickLine={false} axisLine={false} />
               <Tooltip content={<Tip />} />
               <ReferenceLine yAxisId="score" y={settings.sleepScoreGoal} stroke={HEX.sleep} strokeDasharray="3 4" opacity={0.6} />
               <Bar yAxisId="hours" dataKey="hours" name="Hours" fill={HEX.hours} opacity={0.35} radius={[2, 2, 0, 0]} />
@@ -1825,9 +1901,9 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
             {rhrArr.length ? (
               <Chart h={170}>
                 <LineChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-                  <CartesianGrid stroke={gridStroke} vertical={false} />
-                  <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
-                  <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={axisStyle} tickLine={false} axisLine={false} />
+                  <CartesianGrid stroke={HEX.grid} vertical={false} />
+                  <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                  <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={axisTick()} tickLine={false} axisLine={false} />
                   <Tooltip content={<Tip />} />
                   <Line type="monotone" dataKey="rhr" name="RHR" stroke={HEX.rhr} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
                 </LineChart>
@@ -1842,9 +1918,9 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
             {bedArr.length ? (
               <Chart h={170}>
                 <LineChart data={chart} margin={{ top: 6, right: 8, left: -10, bottom: 0 }}>
-                  <CartesianGrid stroke={gridStroke} vertical={false} />
-                  <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
-                  <YAxis domain={["dataMin - 30", "dataMax + 30"]} tick={axisStyle} tickLine={false} axisLine={false} tickFormatter={(v) => fmtBedtime(v)} width={54} />
+                  <CartesianGrid stroke={HEX.grid} vertical={false} />
+                  <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                  <YAxis domain={["dataMin - 30", "dataMax + 30"]} tick={axisTick()} tickLine={false} axisLine={false} tickFormatter={(v) => fmtBedtime(v)} width={54} />
                   <Tooltip content={<Tip fmt={(p) => fmtBedtime(p.value)} />} />
                   <Line type="monotone" dataKey="bed" name="Bedtime" stroke={HEX.sleep} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
                 </LineChart>
@@ -1858,9 +1934,9 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
           <div className="body" style={{ paddingTop: 8 }}>
             <Chart h={170}>
               <BarChart data={weekday} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-                <CartesianGrid stroke={gridStroke} vertical={false} />
-                <XAxis dataKey="day" tick={axisStyle} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
-                <YAxis domain={[40, 100]} tick={axisStyle} tickLine={false} axisLine={false} />
+                <CartesianGrid stroke={HEX.grid} vertical={false} />
+                <XAxis dataKey="day" tick={axisTick()} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                <YAxis domain={[40, 100]} tick={axisTick()} tickLine={false} axisLine={false} />
                 <Tooltip content={<Tip fmt={(p) => `${p.value} (${p.payload.n} nights)`} />} />
                 <Bar dataKey="score" name="Score" radius={[2, 2, 0, 0]}>
                   {weekday.map((w, i) => <Cell key={i} fill={HEX.sleep} opacity={w.score != null && w.score >= settings.sleepScoreGoal ? 0.9 : 0.5} />)}
@@ -1878,7 +1954,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
             <table>
               <thead><tr><th>Condition</th><th className="num">Avg score</th><th className="num">Nights</th></tr></thead>
               <tbody>
-                <tr><td>After drinking</td><td className="num" style={{ color: KIND_META.alcohol.hex }}>{afterDrinks.length ? Math.round(avg(afterDrinks)) : "—"}</td><td className="num">{afterDrinks.length}</td></tr>
+                <tr><td>After drinking</td><td className="num" style={{ color: kindHex("alcohol") }}>{afterDrinks.length ? Math.round(avg(afterDrinks)) : "—"}</td><td className="num">{afterDrinks.length}</td></tr>
                 <tr><td>Dry day before</td><td className="num">{dry.length ? Math.round(avg(dry)) : "—"}</td><td className="num">{dry.length}</td></tr>
                 <tr><td>Trained the day before</td><td className="num" style={{ color: HEX.lift }}>{afterTrain.length ? Math.round(avg(afterTrain)) : "—"}</td><td className="num">{afterTrain.length}</td></tr>
                 <tr><td>No training day before</td><td className="num">{noTrain.length ? Math.round(avg(noTrain)) : "—"}</td><td className="num">{noTrain.length}</td></tr>
@@ -1991,10 +2067,10 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
         <div className="body" style={{ paddingTop: 8 }}>
           <Chart h={210}>
             <ComposedChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-              <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
-              <YAxis yAxisId="dist" tick={axisStyle} tickLine={false} axisLine={false} />
-              <YAxis yAxisId="pace" orientation="right" reversed domain={["dataMin - 30", "dataMax + 30"]} tick={axisStyle} tickLine={false} axisLine={false} tickFormatter={(v) => secsToClock(v)} width={44} />
+              <CartesianGrid stroke={HEX.grid} vertical={false} />
+              <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+              <YAxis yAxisId="dist" tick={axisTick()} tickLine={false} axisLine={false} />
+              <YAxis yAxisId="pace" orientation="right" reversed domain={["dataMin - 30", "dataMax + 30"]} tick={axisTick()} tickLine={false} axisLine={false} tickFormatter={(v) => secsToClock(v)} width={44} />
               <Tooltip content={<Tip fmt={(p) => p.dataKey === "dist" ? `${p.value} ${u}` : p.dataKey === "pace" ? `${secsToClock(p.value)}/${u}` : p.value} />} />
               <ReferenceLine yAxisId="dist" y={round(targetPer, 1)} stroke={HEX.run} strokeDasharray="3 4" opacity={0.6} />
               <Bar yAxisId="dist" dataKey="dist" name="Distance" radius={[2, 2, 0, 0]}>
@@ -2138,7 +2214,7 @@ function IntakeDash({ doses, sleep, sessions, days, settings, range }) {
   const weeks = Math.max(1, range / 7);
 
   const recent = [...doses].sort((a, b) => new Date(b.ts) - new Date(a.ts)).slice(0, 20);
-  const C = { coffees: KIND_META.caffeine.hex, drinks: KIND_META.alcohol.hex, edibles: KIND_META.cannabis.hex, zyns: KIND_META.nicotine.hex, addy: KIND_META.stimulant.hex };
+  const C = { coffees: kindHex("caffeine"), drinks: kindHex("alcohol"), edibles: kindHex("cannabis"), zyns: kindHex("nicotine"), addy: kindHex("stimulant") };
   const tipFmt = (p) => (p.dataKey === "coffees" ? `${p.value} coffee${p.value === 1 ? "" : "s"}` : p.dataKey === "drinks" ? `${p.value} drinks` : `${p.value} mg`);
 
   return (
@@ -2172,10 +2248,10 @@ function IntakeDash({ doses, sleep, sessions, days, settings, range }) {
         <div className="body" style={{ paddingTop: 8 }}>
           <Chart h={240}>
             <BarChart data={chart} margin={{ top: 6, right: 8, left: -18, bottom: 0 }} barCategoryGap="22%" barGap={1}>
-              <CartesianGrid stroke={gridStroke} vertical={false} />
-              <XAxis dataKey="label" tick={axisStyle} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: "#B9CADC" }} />
-              <YAxis yAxisId="count" tick={axisStyle} tickLine={false} axisLine={false} allowDecimals={false} />
-              <YAxis yAxisId="mg" orientation="right" tick={axisStyle} tickLine={false} axisLine={false} />
+              <CartesianGrid stroke={HEX.grid} vertical={false} />
+              <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+              <YAxis yAxisId="count" tick={axisTick()} tickLine={false} axisLine={false} allowDecimals={false} />
+              <YAxis yAxisId="mg" orientation="right" tick={axisTick()} tickLine={false} axisLine={false} />
               <Tooltip content={<Tip fmt={tipFmt} />} />
               <Bar yAxisId="count" dataKey="coffees" name="Coffees" fill={C.coffees} radius={[2, 2, 0, 0]} />
               <Bar yAxisId="count" dataKey="drinks" name="Drinks" fill={C.drinks} radius={[2, 2, 0, 0]} />
@@ -2738,6 +2814,7 @@ function PresetEditor({ settings, setSettings }) {
 function withDefaults(st) {
   const s = { ...DEFAULT_SETTINGS, ...(st || {}), race: { ...DEFAULT_SETTINGS.race, ...((st && st.race) || {}) } };
   if (!Array.isArray(s.dayTags)) s.dayTags = DEFAULT_SETTINGS.dayTags;
+  if (!PALETTES[s.theme]) s.theme = "light";
   if (!Array.isArray(s.presets) || !s.presets.length) s.presets = DEFAULT_SETTINGS.presets;
   else {
     // bring saved chips in line with the current defaults without touching ones you added yourself
@@ -2804,6 +2881,18 @@ export default function HealthLog({ email, onSignOut }) {
   // Strong sets become lift sessions unless a hand-logged lift already covers that day.
   const sessions = useMemo(() => [...manualSessions, ...sessionsFromLifts(lifts, manualSessions)], [manualSessions, lifts]);
 
+  // charts take colours from plain JS, so point them at the chosen palette before anything draws
+  const theme = PALETTES[settings.theme] ? settings.theme : "light";
+  CURRENT_THEME = theme;
+  useEffect(() => {
+    const c = PALETTES[theme];
+    document.documentElement.style.background = c.paper;
+    document.body.style.background = c.paper;
+    let meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) { meta = document.createElement("meta"); meta.name = "theme-color"; document.head.appendChild(meta); }
+    meta.content = c.paper;
+  }, [theme]);
+
   const addDose = (d) => setDoses((x) => [...x, d]);
   const removeDose = (id) => setDoses((x) => x.filter((d) => d.id !== id));
   const upsertSleep = (rec) => setSleep((x) => mergeBy(x, [rec], (r) => r.date));
@@ -2819,11 +2908,11 @@ export default function HealthLog({ email, onSignOut }) {
   const tabs = [["log", "Log"], ["overview", "Overview"], ["sleep", "Sleep"], ["training", "Training"], ["intake", "Intake"], ["data", "Data"]];
 
   if (!loaded) {
-    return <div className="hl"><style>{CSS}</style><div className="wrap"><p className="note">Opening your log…</p></div></div>;
+    return <div className={`hl t-${theme}`}><style>{CSS}</style><div className="wrap"><p className="note">Opening your log…</p></div></div>;
   }
 
   return (
-    <div className="hl">
+    <div className={`hl t-${theme}`}>
       <style>{CSS}</style>
       <div className="wrap">
         <header className="top">
@@ -2832,6 +2921,13 @@ export default function HealthLog({ email, onSignOut }) {
             {daysOut != null && daysOut >= 0 ? (
               <><b>{daysOut} days</b>to {settings.race.name || "race day"}{settings.race.goalTime ? `, goal ${settings.race.goalTime}` : ""}</>
             ) : <>No race set</>}
+            <div className="themepick" style={{ marginTop: 6 }}>
+              <span className="seg" role="group" aria-label="Colour theme">
+                {THEMES.map(([id, name]) => (
+                  <button key={id} aria-pressed={theme === id} onClick={() => setSettings({ ...settings, theme: id })}>{name}</button>
+                ))}
+              </span>
+            </div>
             <div style={{ marginTop: 4 }}>
               <span style={{ color: "var(--faint)" }}>{email}</span>
               {" · "}<button className="del" onClick={onSignOut} style={{ fontSize: 12, color: "var(--soft)" }}>sign out</button>

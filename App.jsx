@@ -4,6 +4,12 @@ import { store } from "./storage";
 import { supabase } from "./supabase";
 import { parseNotes } from "./notesImport";
 import {
+  pad, KM_PER_MI, toUnit, fromUnit, round, clamp, avg, sum,
+  toDayKey, fromDayKey, addDays, mondayOf, dayKeyFor, lastNDays,
+  minsToHM, secsToClock, fmtShort, fmtDayLabel, median, quantile, relToMedian, pearson, paceSecOf,
+  LAG_W, regenRaw, degenRaw, lagged, buildIndices, rollup, trainingLoad, staminaFrom,
+} from "./scores";
+import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar, ScatterChart, Scatter, ZAxis,
   XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, Cell, ComposedChart,
 } from "recharts";
@@ -35,15 +41,17 @@ const DEFAULT_SETTINGS = {
   dayTags: ["normal", "social", "date", "travel", "work late", "sick", "family"],
   race: { name: "", date: "", goalTime: "" },
   presets: [
-    { id: "c1", kind: "caffeine", label: "Drip coffee", amount: 95, unit: "mg" },
+    { id: "c1", kind: "caffeine", label: "Americano", amount: 128, unit: "mg" },
     { id: "c2", kind: "caffeine", label: "Espresso", amount: 64, unit: "mg" },
     { id: "c3", kind: "caffeine", label: "Cold brew", amount: 200, unit: "mg" },
-    { id: "c4", kind: "caffeine", label: "Tea", amount: 47, unit: "mg" },
+    { id: "c4", kind: "caffeine", label: "Matcha", amount: 70, unit: "mg" },
     { id: "a1", kind: "alcohol", label: "Beer", amount: 1, unit: "drinks" },
     { id: "a2", kind: "alcohol", label: "Wine", amount: 1, unit: "drinks" },
     { id: "a3", kind: "alcohol", label: "Cocktail", amount: 1.5, unit: "drinks" },
     { id: "a4", kind: "alcohol", label: "Shot", amount: 1, unit: "drinks" },
+    { id: "a5", kind: "alcohol", label: "Soju shot", amount: 1, unit: "drinks" },
     { id: "w1", kind: "cannabis", label: "Edible", amount: 10, unit: "mg", ask: true },
+    { id: "w7", kind: "cannabis", label: "OffField", amount: 1.5, unit: "mg" },
     { id: "w3", kind: "cannabis", label: "Preroll", amount: 1, unit: "sessions" },
     { id: "w4", kind: "cannabis", label: "Bong hit", amount: 1, unit: "hits" },
     { id: "w5", kind: "cannabis", label: "Joint", amount: 1, unit: "sessions" },
@@ -101,64 +109,16 @@ const kindHex = (kind) => HEX[{ caffeine: "caf", alcohol: "alc", cannabis: "thc"
 /* ================================================================== */
 
 const uid = () => Math.random().toString(36).slice(2, 10);
-const pad = (n) => String(n).padStart(2, "0");
-const KM_PER_MI = 1.609344;
-const toUnit = (km, u) => (u === "mi" ? km / KM_PER_MI : km);
-const fromUnit = (v, u) => (u === "mi" ? v * KM_PER_MI : v);
-const round = (n, d = 1) => (n == null || isNaN(n) ? null : Math.round(n * 10 ** d) / 10 ** d);
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
-const sum = (arr) => arr.reduce((a, b) => a + b, 0);
 const numOf = (v) => {
   if (v == null || v === "") return null;
   const n = Number(String(v).replace(/[^\d.-]/g, ""));
   return isNaN(n) ? null : n;
 };
 
-function toDayKey(d) {
-  const x = d instanceof Date ? d : new Date(d);
-  return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
-}
-function fromDayKey(k) { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); }
-function addDays(k, n) { const d = fromDayKey(k); d.setDate(d.getDate() + n); return toDayKey(d); }
-function mondayOf(k) {
-  const d = fromDayKey(k);
-  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  return toDayKey(d);
-}
-function dayKeyFor(ts, dayStartHour) {
-  return toDayKey(new Date(new Date(ts).getTime() - dayStartHour * 3600e3));
-}
-function lastNDays(n, endKey) {
-  const out = [];
-  for (let i = n - 1; i >= 0; i--) out.push(addDays(endKey, -i));
-  return out;
-}
 function fmtClock(ts) {
   const d = new Date(ts); let h = d.getHours();
   const ap = h >= 12 ? "pm" : "am"; h = h % 12 || 12;
   return `${h}:${pad(d.getMinutes())}${ap}`;
-}
-function fmtDayLabel(k) {
-  return fromDayKey(k).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-}
-function fmtShort(k) {
-  return fromDayKey(k).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-function minsToHM(m) {
-  if (m == null || isNaN(m)) return "—";
-  return `${Math.floor(m / 60)}h ${pad(Math.round(m % 60))}m`;
-}
-function secsToClock(s) {
-  if (s == null || isNaN(s) || !isFinite(s)) return "—";
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = Math.round(s % 60);
-  return h > 0 ? `${h}:${pad(m)}:${pad(x)}` : `${m}:${pad(x)}`;
-}
-/* pace of a session in the current unit: from time+distance if both exist, else from a stored pace */
-function paceSecOf(s, unit) {
-  if (s.movingSec && s.distanceKm) return s.movingSec / toUnit(s.distanceKm, unit);
-  if (s.paceSecPerKm) return unit === "mi" ? s.paceSecPerKm * KM_PER_MI : s.paceSecPerKm;
-  return null;
 }
 function parsePace(v) {
   // "8:30" -> 510 sec; "8" -> 480; "8.5" -> 510
@@ -213,38 +173,8 @@ function parseHours(v) {
   if (s.includes(":")) { const [h, m] = s.split(":").map(Number); return (h || 0) * 60 + (m || 0); }
   const n = Number(s); return isNaN(n) ? null : n * 60;
 }
-function median(arr) {
-  if (!arr.length) return null;
-  const s = [...arr].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-}
-/* Linear interpolation into a sorted list, for percentiles. */
-function quantile(sorted, q) {
-  if (!sorted.length) return null;
-  const pos = (sorted.length - 1) * q;
-  const i = Math.floor(pos), frac = pos - i;
-  return i + 1 < sorted.length ? sorted[i] + frac * (sorted[i + 1] - sorted[i]) : sorted[i];
-}
 
-/* Where a value sits in its own window: median = 50, with the ends pinned to the
-   5th and 95th percentiles rather than the single best and worst day, so one outlier
-   cannot flatten everything else. Beyond those ends the index simply saturates. */
-function relToMedian(v, arr) {
-  if (v == null || arr.length < 3) return null;
-  const s = [...arr].sort((a, b) => a - b);
-  const med = median(s), lo = quantile(s, 0.05), hi = quantile(s, 0.95);
-  if (v >= med) return hi <= med ? 50 : clamp(50 + (50 * (v - med)) / (hi - med), 0, 100);
-  return med <= lo ? 50 : clamp((50 * (v - lo)) / (med - lo), 0, 100);
-}
 
-function pearson(xs, ys) {
-  const n = xs.length; if (n < 4) return null;
-  const mx = avg(xs), my = avg(ys);
-  let num = 0, dx = 0, dy = 0;
-  for (let i = 0; i < n; i++) { const a = xs[i] - mx, b = ys[i] - my; num += a * b; dx += a * a; dy += b * b; }
-  return dx && dy ? num / Math.sqrt(dx * dy) : null;
-}
 function parseDuration(v) {
   if (v == null || v === "") return null;
   if (typeof v === "number") return v > 1000 ? v / 60 : v;
@@ -300,6 +230,8 @@ function parseGarminSleep(rows, headers) {
     rhr: findCol(headers, ["resting heart rate", "resting hr", "rhr"]),
     bb: findCol(headers, ["body battery"]),
     bed: findCol(headers, ["bedtime", "sleep start"]),
+    vo2: findCol(headers, ["vo2 max", "vo2max", "vo2"]),
+    fitAge: findCol(headers, ["fitness age", "fitnessage"]),
   };
   const out = [];
   for (const r of rows) {
@@ -314,6 +246,8 @@ function parseGarminSleep(rows, headers) {
       restingHr: c.rhr ? numOf(r[c.rhr]) : null,
       bodyBattery: c.bb ? numOf(r[c.bb]) : null,
       bedtime: bedRaw ? parseBedtime(`${bedRaw[1]}:${bedRaw[2]}${bedRaw[3] || ""}`) : null,
+      vo2: c.vo2 ? numOf(r[c.vo2]) : null,
+      fitnessAge: c.fitAge ? numOf(r[c.fitAge]) : null,
     });
   }
   return out;
@@ -575,6 +509,29 @@ const CSS = `
 /* ================================================================== */
 /* small shared bits                                                  */
 /* ================================================================== */
+
+/* One panel throwing must not take the whole app down — especially between deploys. */
+class Boundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { console.error("panel crashed:", this.props.where, err, info); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <div className="panel" style={{ borderColor: "var(--alert)" }}>
+        <h2 style={{ color: "var(--alert)" }}>{this.props.where || "This section"} could not be drawn</h2>
+        <div className="body">
+          <p className="note">
+            Everything else still works, and nothing you have logged is affected. Switching the range or
+            the tab often clears it.
+          </p>
+          <p className="note" style={{ marginTop: 8, color: "var(--faint)" }}>{String(this.state.err?.message || this.state.err)}</p>
+          <button className="ghost" style={{ marginTop: 10 }} onClick={() => this.setState({ err: null })}>Try again</button>
+        </div>
+      </div>
+    );
+  }
+}
 
 function Stat({ v, l, sub, color, bar }) {
   return (
@@ -999,35 +956,8 @@ function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDos
 /* ================================================================== */
 
 function useDaily({ doses, sleep, sessions, days = [], settings }) {
-  return useMemo(() => {
-    const byDay = new Map();
-    const blank = (k) => ({ date: k, sleep: null, sessions: [], caf: 0, cafCount: 0, alc: 0, thc: 0, thcMg: 0, thcSessions: 0, nic: 0, nicMg: 0, stim: 0, stimMg: 0, entries: [], tags: [], note: "", steps: null });
-    const day = (k) => { if (!byDay.has(k)) byDay.set(k, blank(k)); return byDay.get(k); };
-    for (const s of sleep) if (s.score != null || s.asleepMin != null || s.restingHr != null || s.bodyBattery != null || s.bedtime) day(s.date).sleep = s;
-    for (const d of days) { const x = day(d.date); x.tags = d.tags || []; x.note = d.note || ""; x.steps = d.steps ?? null; }
-    for (const s of sessions) day(s.date).sessions.push(s);
-    for (const d of doses) {
-      const k = dayKeyFor(d.ts, settings.dayStartHour); const x = day(k);
-      x.entries.push(d);
-      if (d.kind === "caffeine") { x.caf += d.amount; x.cafCount += 1; }
-      else if (d.kind === "alcohol") x.alc += d.amount;
-      else if (d.kind === "cannabis") { x.thc += 1; if (d.unit === "mg") x.thcMg += d.amount; else x.thcSessions += d.amount; }
-      else if (d.kind === "nicotine") { x.nic += 1; x.nicMg += d.unit === "mg" ? d.amount : 6 * d.amount; }
-      else if (d.kind === "stimulant") { x.stim += d.amount; x.stimMg += d.amount; }
-    }
-    for (const x of byDay.values()) {
-      const runs = x.sessions.filter((s) => s.kind === "run");
-      x.runKm = sum(runs.map((s) => s.distanceKm || 0));
-      x.hasRun = runs.length > 0;
-      x.hasLift = x.sessions.some((s) => s.kind === "lift");
-      x.isRest = !x.hasRun && !x.hasLift && x.sessions.some((s) => s.kind === "rest");
-      // distance-weighted pace for the day, seconds per km
-      const paced = runs.map((s) => ({ p: paceSecOf(s, "km"), d: s.distanceKm || 0 })).filter((r) => r.p);
-      x.paceSecKm = paced.length ? (paced.every((r) => r.d) ? sum(paced.map((r) => r.p * r.d)) / sum(paced.map((r) => r.d)) : avg(paced.map((r) => r.p))) : null;
-    }
-    const get = (k) => byDay.get(k) || { ...blank(k), runKm: 0, hasRun: false, hasLift: false, isRest: false, paceSecKm: null };
-    return { byDay, get };
-  }, [doses, sleep, sessions, days, settings.dayStartHour]);
+  return useMemo(() => rollup({ doses, sleep, sessions, days, settings }),
+    [doses, sleep, sessions, days, settings.dayStartHour]);
 }
 
 function daysSince(doses, kind) {
@@ -1037,77 +967,11 @@ function daysSince(doses, kind) {
 
 /* ---- the three indices --------------------------------------------- */
 
-// yesterday counts half, then it fades: 5/10, 3/10, 1.5/10, 0.5/10
-const LAG_W = [0.5, 0.3, 0.15, 0.05];
 
-// Regen: how well you have been sleeping. Garmin's score, or hours against your goal if there's no score.
-function regenRaw(x, settings) {
-  const s = x.sleep;
-  if (!s) return null;
-  if (s.score != null) return clamp(s.score, 0, 100);
-  if (s.asleepMin != null) return clamp((s.asleepMin / 60 / settings.sleepHoursGoal) * 85, 0, 100);
-  return null;
-}
 
-// Run: distance and pace. A run of a quarter of your weekly target scores 100 on distance;
-// pace is judged against your own 90-day median, ten percent faster is full marks.
-function runRaw(x, medianPaceKm, settings) {
-  if (!x.hasRun) return 0;
-  const u = settings.distanceUnit;
-  const perRun = (settings.weeklyDistanceTarget || 40) / 4;
-  const distScore = clamp((100 * toUnit(x.runKm, u)) / perRun, 0, 120);
-  if (x.paceSecKm && medianPaceKm) {
-    const rel = (medianPaceKm - x.paceSecKm) / medianPaceKm;       // positive = faster than usual
-    const paceScore = clamp(50 + rel * 500, 0, 100);
-    return clamp(0.65 * distScore + 0.35 * paceScore, 0, 100);
-  }
-  return clamp(distScore, 0, 100);
-}
 
-// Degen: how much you have been putting in. Big nights count for far more than the sum of their parts.
-function degenRaw(x) {
-  const drinks = x.alc || 0, thc = x.thcMg || 0, sess = x.thcSessions || 0, nic = x.nicMg || 0, stim = x.stimMg || 0, cof = x.cafCount || 0;
-  let s = 4 * cof + 6 * drinks + 3 * thc + 8 * sess + 1 * nic + 3 * stim;
-  const heavyDrink = drinks > 4.5;
-  const heavyWeed = thc > 5 || sess >= 2;
-  if (heavyDrink) s += 40 + 10 * (drinks - 4.5);
-  if (heavyWeed) s += 30 + 3 * Math.max(0, thc - 5);
-  if (heavyDrink && heavyWeed) s *= 1.25;
-  return clamp(s, 0, 100);
-}
 
-// Rolling value for a day: the four days before it, weighted. Missing sleep is skipped and the weights
-// renormalised; a day with no run or no intake logged counts as zero, because that is what it was.
-function lagged(rawByDate, dayKey, missingAsZero) {
-  let num = 0, den = 0;
-  LAG_W.forEach((w, i) => {
-    const v = rawByDate.get(addDays(dayKey, -(i + 1)));
-    if (v == null) { if (missingAsZero) den += w; return; }
-    num += v * w; den += w;
-  });
-  return den ? num / den : null;
-}
 
-function buildIndices(daily, dayKeys, settings) {
-  const first = dayKeys[0];
-  const ext = [...lastNDays(4, addDays(first, -1)), ...dayKeys];
-  const recent = lastNDays(90, dayKeys[dayKeys.length - 1]).map((k) => daily.get(k).paceSecKm).filter(Boolean);
-  const medianPaceKm = recent.length ? median(recent) : null;
-
-  const regen = new Map(), run = new Map(), degen = new Map();
-  for (const k of ext) {
-    const x = daily.get(k);
-    regen.set(k, regenRaw(x, settings));
-    run.set(k, runRaw(x, medianPaceKm, settings));
-    degen.set(k, degenRaw(x));
-  }
-  return dayKeys.map((k) => ({
-    date: k, label: fmtShort(k),
-    regen: round(lagged(regen, k, false), 1),
-    run: round(lagged(run, k, true), 1),
-    degen: round(lagged(degen, k, true), 1),
-  }));
-}
 
 /* ---- global range + buckets ---------------------------------------- */
 
@@ -1256,7 +1120,7 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
 
       <RunVsState daily={daily} sessions={sessions} settings={settings} range={range} />
 
-      <DegenRidges daily={daily} settings={settings} range={range} />
+      <ScoreRidges which="degen" daily={daily} settings={settings} range={range} />
 
       <div className="panel">
         <h2>Sleep against training load <span className="hint">per {bucketNoun(range)}</span></h2>
@@ -1309,10 +1173,17 @@ function useScores(daily, settings, range) {
     // Place each score against its own spread over the window: the window's lowest day
     // is 0, its median 50, its highest 100. A week is too short for that to say anything,
     // so 7d keeps the raw number.
+    // the same window again, immediately before this one, so real change is visible
+    const prevSpan = lastNDays(range, addDays(span[0], -1));
+    const prevRows = buildIndices(daily, prevSpan, settings);
+
     const indexed = range >= 30;
-    const rel = {}, band = {};
+    const rel = {}, band = {}, delta = {};
     for (const k of SCORE_KEYS) {
       const vals = rows.map((r) => r[k]).filter((v) => v != null);
+      const prevVals = prevRows.map((r) => r[k]).filter((v) => v != null);
+      delta[k] = vals.length >= 3 && prevVals.length >= 3
+        ? round(median(vals) - median(prevVals), 1) : null;
       const sorted = [...vals].sort((a, b) => a - b);
       band[k] = vals.length >= 3
         ? { median: round(median(vals), 1), lo: round(quantile(sorted, 0.05), 1), hi: round(quantile(sorted, 0.95), 1), n: vals.length }
@@ -1326,20 +1197,24 @@ function useScores(daily, settings, range) {
       run: round(bucketAvg(b, (k) => byDate.get(k)?.run ?? null), 1),
       degen: round(bucketAvg(b, (k) => byDate.get(k)?.degen ?? null), 1),
     }));
-    return { now, rel, band, chart, indexed };
+    return { now, rel, band, delta, chart, indexed };
   }, [daily, settings, range, today]);
 }
 
 /* The headline number: placed against the window when there is enough of it, raw otherwise. */
-function ScoreStat({ which, now, rel, band, indexed }) {
+function ScoreStat({ which, now, rel, band, delta, indexed }) {
   const m = SCORES[which];
   const raw = now?.[which];
   const v = indexed ? rel[which] : raw;
   const b = band[which];
+  const d = delta?.[which];
+  // the index is self-relative, so a sustained change only shows as a window-on-window move
+  const move = d == null || Math.abs(d) < 0.5 ? null
+    : `${d > 0 ? "▲" : "▼"} ${Math.abs(d)} vs the ${band[which]?.n ? "previous" : "prior"} period`;
   const sub = raw == null ? "nothing logged yet"
     : indexed && v != null && b
-      ? `${Math.round(raw)} raw · median ${b.median}, usual ${b.lo}–${b.hi}`
-      : `${m.tag} has been ${scoreWord(raw, m.good)}`;
+      ? `${Math.round(raw)} raw · median ${b.median}${move ? ` · ${move}` : ""}`
+      : `${m.tag} has been ${scoreWord(raw, m.good)}${move ? ` · ${move}` : ""}`;
   return (
     <Stat v={v != null ? Math.round(v) : null} l={indexed && v != null ? `${m.name}, vs window` : `${m.name}, raw`}
           color={m.color} sub={sub} bar={v != null ? { pct: v, color: m.color } : null} />
@@ -1409,6 +1284,16 @@ function ScorePanel({ which, daily, settings, range }) {
         <div className="scorerow">
           <div>
             <ScoreStat which={which} {...sc} />
+            {which === "run" && sc.now?.freshness != null && (
+              <div style={{ marginTop: 10 }}>
+                <Stat v={`${sc.now.freshness > 0 ? "+" : ""}${Math.round(sc.now.freshness)}%`} l="Freshness"
+                      color={sc.now.freshness >= 5 ? HEX.run : sc.now.freshness <= -12 ? HEX.alert : HEX.rest}
+                      sub={sc.now.freshness >= 15 ? "well rested, or detrained"
+                        : sc.now.freshness >= 5 ? "rested"
+                        : sc.now.freshness > -12 ? "normal training fatigue"
+                        : "carrying real fatigue"} />
+              </div>
+            )}
             {sc.indexed && raw != null && b && (
               <p className="note" style={{ marginTop: 8 }}>
                 {r == null ? "Not enough days in this window to place it."
@@ -1604,15 +1489,15 @@ function RunVsState({ daily, sessions, settings, range }) {
   );
 }
 
-/* Degen by weekday, drawn as overlapping density curves. */
-function DegenRidges({ daily, settings, range }) {
+/* Any of the three scores by weekday, drawn as overlapping density curves. */
+function ScoreRidges({ which = "degen", daily, settings, range }) {
   const today = toDayKey(new Date());
   const rows = useMemo(() => {
     const span = lastNDays(range, today);
     const idx = buildIndices(daily, span, settings);
     const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const byDow = new Map(DOW.map((d) => [d, []]));
-    for (const x of idx) if (x.degen != null) byDow.get(DOW[fromDayKey(x.date).getDay()]).push(x.degen);
+    for (const x of idx) if (x[which] != null) byDow.get(DOW[fromDayKey(x.date).getDay()]).push(x[which]);
 
     // a gaussian kernel over 0..100, so a handful of days still reads as a curve
     const grid = Array.from({ length: 51 }, (_, i) => i * 2);
@@ -1623,7 +1508,7 @@ function DegenRidges({ daily, settings, range }) {
       const peak = Math.max(...dens, 1e-9);
       return { day: d, n: v.length, med: v.length ? round(median(v), 0) : null, dens: dens.map((y) => y / peak) };
     });
-  }, [daily, settings, range, today]);
+  }, [daily, settings, range, today, which]);
 
   const W = 720, rowH = 42, padL = 46, padR = 62, padT = 50;
   const H = padT + rows.length * rowH + 24;
@@ -1633,7 +1518,7 @@ function DegenRidges({ daily, settings, range }) {
 
   return (
     <div className="panel">
-      <h2>Degen by day of the week <span className="hint">where each weekday's days tend to land</span></h2>
+      <h2>{SCORES[which].name} by day of the week <span className="hint">where each weekday tends to land</span></h2>
       <div className="body" style={{ paddingTop: 10 }}>
         {!anyData ? <p className="empty">Nothing to draw yet.</p> : (
           <>
@@ -1654,10 +1539,10 @@ function DegenRidges({ daily, settings, range }) {
                     <line x1={padL} x2={padL + iw} y1={base} y2={base} stroke={HEX.grid} />
                     {r.n > 0 && (
                       <>
-                        <path d={`${path} L${x(50)},${base} L${padL},${base} Z`} fill={weekend ? HEX.alert : HEX.sleep} opacity={weekend ? 0.28 : 0.16} />
-                        <path d={path} fill="none" stroke={weekend ? HEX.alert : HEX.sleep} strokeWidth="2"
+                        <path d={`${path} L${x(50)},${base} L${padL},${base} Z`} fill={weekend ? HEX.alert : SCORES[which].color} opacity={weekend ? 0.28 : 0.16} />
+                        <path d={path} fill="none" stroke={weekend ? HEX.alert : SCORES[which].color} strokeWidth="2"
                               strokeDasharray={weekend ? "6 3" : "0"} />
-                        {r.med != null && <circle cx={x(r.med / 2)} cy={base} r="2.8" fill={weekend ? HEX.alert : HEX.sleep} />}
+                        {r.med != null && <circle cx={x(r.med / 2)} cy={base} r="2.8" fill={weekend ? HEX.alert : SCORES[which].color} />}
                       </>
                     )}
                     <text x={padL - 8} y={base - 2} fontSize="11" fill={HEX.soft} textAnchor="end">{r.day}</text>
@@ -1669,7 +1554,7 @@ function DegenRidges({ daily, settings, range }) {
               })}
             </svg>
             <div className="legend">
-              <span>curves show where that weekday's Degen scores pile up; the dot marks its median</span>
+              <span>curves show where that weekday's {SCORES[which].name} scores pile up; the dot marks its median</span>
               <span><i style={{ background: HEX.alert, opacity: 0.6 }} />Fri and Sat, drawn with a dashed outline</span>
               <span>right-hand figures are median and days counted</span>
             </div>
@@ -1850,6 +1735,7 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
   return (
     <>
       <ScorePanel which="regen" daily={daily} settings={settings} range={range} />
+      <ScoreRidges which="regen" daily={daily} settings={settings} range={range} />
       <div className="panel">
         <h2>Sleep <span className="hint">last {range} days</span></h2>
         <div className="body">
@@ -2046,6 +1932,7 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
   return (
     <>
       <ScorePanel which="run" daily={daily} settings={settings} range={range} />
+      <ScoreRidges which="run" daily={daily} settings={settings} range={range} />
       <div className="panel">
         <h2>Training <span className="hint">last {range} days</span></h2>
         <div className="body">
@@ -2134,6 +2021,10 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
         </div>
       </div>
 
+      <AerobicCapacity daily={daily} range={range} />
+
+      <Bests daily={daily} sessions={sessions} doses={doses} settings={settings} />
+
       <div className="grid2">
         <div className="panel">
           <h2>Race</h2>
@@ -2175,6 +2066,136 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
         </div>
       </div>
     </>
+  );
+}
+
+/* The numbers worth chasing, over the whole log rather than the selected range. */
+function Bests({ daily, sessions, doses, settings }) {
+  const u = settings.distanceUnit;
+  const today = toDayKey(new Date());
+
+  const runs = sessions.filter((s) => s.kind === "run" && s.distanceKm);
+  const longest = runs.reduce((a, r) => (r.distanceKm > (a?.distanceKm || 0) ? r : a), null);
+  // fastest pace only counts runs of a sensible length, so a two-mile blast doesn't win everything
+  const proper = runs.filter((r) => toUnit(r.distanceKm, u) >= 3 && paceSecOf(r, u));
+  const fastest = proper.reduce((a, r) => (paceSecOf(r, u) < paceSecOf(a, u) ? r : a), proper[0] || null);
+
+  const weeks = new Map();
+  for (const r of runs) {
+    const w = mondayOf(r.date);
+    weeks.set(w, (weeks.get(w) || 0) + r.distanceKm);
+  }
+  const bigWeek = [...weeks.entries()].sort((a, b) => b[1] - a[1])[0] || null;
+
+  const allDays = [...daily.byDay.keys()].sort();
+  const from = allDays[0] || today;
+  const span = [];
+  for (let k = from; k <= today; k = addDays(k, 1)) span.push(k);
+
+  const longestRun = (test) => {
+    let best = 0, cur = 0, bestEnd = null;
+    for (const k of span) { if (test(daily.get(k))) { cur++; if (cur > best) { best = cur; bestEnd = k; } } else cur = 0; }
+    return { best, bestEnd };
+  };
+  const current = (test) => {
+    let n = 0;
+    for (let i = 0; i < span.length; i++) { const k = addDays(today, -i); if (!daily.byDay.has(k) && i > 0) break; if (test(daily.get(k))) n++; else if (i > 0) break; }
+    return n;
+  };
+  const dry = longestRun((x) => !x.alc);
+  const clean = longestRun((x) => !x.alc && !x.thc && !x.nic && !x.stim);
+  const training = longestRun((x) => x.hasRun || x.hasLift);
+
+  const bestSleepWeek = (() => {
+    const wk = new Map();
+    for (const k of span) { const sc = daily.get(k).sleep?.score; if (sc == null) continue; const w = mondayOf(k); if (!wk.has(w)) wk.set(w, []); wk.get(w).push(sc); }
+    const rows = [...wk.entries()].filter(([, v]) => v.length >= 4).map(([w, v]) => [w, avg(v)]);
+    return rows.sort((a, b) => b[1] - a[1])[0] || null;
+  })();
+
+  if (!runs.length && !allDays.length) return null;
+
+  return (
+    <div className="panel">
+      <h2>Bests and streaks <span className="hint">across everything you have logged</span></h2>
+      <div className="body">
+        <div className="grid4" style={{ gap: 12 }}>
+          <Stat v={longest ? round(toUnit(longest.distanceKm, u), 1) : null} l={`longest run (${u})`} color={HEX.run}
+                sub={longest ? fmtShort(longest.date) : ""} />
+          <Stat v={fastest ? secsToClock(paceSecOf(fastest, u)) : null} l={`fastest pace / ${u}`} color={HEX.run}
+                sub={fastest ? `${round(toUnit(fastest.distanceKm, u), 1)} ${u} on ${fmtShort(fastest.date)}` : "runs of 3+ only"} />
+          <Stat v={bigWeek ? round(toUnit(bigWeek[1], u), 1) : null} l={`biggest week (${u})`} color={HEX.run}
+                sub={bigWeek ? `week of ${fmtShort(bigWeek[0])}` : ""} />
+          <Stat v={bestSleepWeek ? Math.round(bestSleepWeek[1]) : null} l="best sleep week" color={HEX.sleep}
+                sub={bestSleepWeek ? `week of ${fmtShort(bestSleepWeek[0])}` : "needs 4 nights in a week"} />
+          <Stat v={training.best || null} l="longest training streak" color={HEX.lift}
+                sub={`${current((x) => x.hasRun || x.hasLift)} running now`} />
+          <Stat v={dry.best || null} l="longest dry streak" color={kindHex("alcohol")}
+                sub={`${current((x) => !x.alc)} days now`} />
+          <Stat v={clean.best || null} l="longest clean streak" color={HEX.lift}
+                sub={`nothing logged at all · ${current((x) => !x.alc && !x.thc && !x.nic && !x.stim)} days now`} />
+          <Stat v={span.length} l="days on record" color={HEX.rest}
+                sub={from !== today ? `since ${fmtShort(from)}` : ""} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Garmin's own read on aerobic fitness. Both update every few days rather than nightly,
+   so the lines connect across the gaps. */
+function AerobicCapacity({ daily, range }) {
+  const today = toDayKey(new Date());
+  const span = lastNDays(range, today);
+  const rows = span.map((k) => {
+    const sl = daily.get(k).sleep;
+    return { k, label: fmtShort(k), vo2: sl?.vo2 ?? null, age: sl?.fitnessAge ?? null };
+  });
+  const vo2s = rows.filter((r) => r.vo2 != null);
+  const ages = rows.filter((r) => r.age != null);
+  if (!vo2s.length && !ages.length) return null;
+
+  const first = vo2s[0]?.vo2, last = vo2s[vo2s.length - 1]?.vo2;
+  const delta = first != null && last != null ? round(last - first, 1) : null;
+  const best = vo2s.length ? Math.max(...vo2s.map((r) => r.vo2)) : null;
+
+  return (
+    <div className="panel">
+      <h2>Aerobic capacity <span className="hint">from Garmin, updated after hard efforts</span></h2>
+      <div className="body" style={{ paddingTop: 8 }}>
+        <div className="grid4" style={{ gap: 12, marginBottom: 12 }}>
+          <Stat v={last ?? null} l="VO₂ max now" color={HEX.run}
+                sub={delta != null ? `${delta >= 0 ? "+" : ""}${delta} over the range` : `${vo2s.length} reading${vo2s.length === 1 ? "" : "s"}`} />
+          <Stat v={best ?? null} l="best in range" color={HEX.run} />
+          {ages.length > 0 && (
+            <Stat v={ages[ages.length - 1].age} l="fitness age" color={HEX.lift}
+                  sub={ages.length > 1 ? `${round(ages[ages.length - 1].age - ages[0].age, 1)} over the range` : ""} />
+          )}
+          <Stat v={vo2s.length} l="readings in range" color={HEX.rest} />
+        </div>
+        <Chart h={190}>
+          <ComposedChart data={rows} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+            <CartesianGrid stroke={HEX.grid} vertical={false} />
+            <XAxis dataKey="label" tick={axisTick()} interval={tickGap(rows.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+            <YAxis yAxisId="v" domain={["dataMin - 2", "dataMax + 2"]} tick={axisTick()} tickLine={false} axisLine={false} />
+            {ages.length > 0 && (
+              <YAxis yAxisId="a" orientation="right" domain={["dataMin - 2", "dataMax + 2"]} tick={axisTick()} tickLine={false} axisLine={false} />
+            )}
+            <Tooltip content={<Tip />} />
+            <Line yAxisId="v" type="monotone" dataKey="vo2" name="VO₂ max" stroke={HEX.run} strokeWidth={2.4} dot={{ r: 2.5 }} connectNulls />
+            {ages.length > 0 && (
+              <Line yAxisId="a" type="monotone" dataKey="age" name="Fitness age" stroke={HEX.lift} strokeWidth={1.8}
+                    strokeDasharray="6 3" dot={false} connectNulls />
+            )}
+          </ComposedChart>
+        </Chart>
+        <div className="legend">
+          <span><i style={{ background: HEX.run }} />VO₂ max (left), higher is fitter</span>
+          {ages.length > 0 && <span><i style={{ background: HEX.lift }} />fitness age (right), lower is fitter</span>}
+          <span>flat stretches are gaps between readings, not plateaus</span>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2220,6 +2241,7 @@ function IntakeDash({ doses, sleep, sessions, days, settings, range }) {
   return (
     <>
       <ScorePanel which="degen" daily={daily} settings={settings} range={range} />
+      <ScoreRidges which="degen" daily={daily} settings={settings} range={range} />
       <div className="panel">
         <h2>Intake <span className="hint">last {range} days</span></h2>
         <div className="body">
@@ -2384,6 +2406,7 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
       return {
         date: k, sleep_score: sl?.score ?? "", hours_asleep: sl?.asleepMin != null ? round(sl.asleepMin / 60, 2) : "", resting_hr: sl?.restingHr ?? "",
         body_battery: sl?.bodyBattery ?? "", bedtime: sl?.bedtime ?? "",
+        vo2_max: sl?.vo2 ?? "", fitness_age: sl?.fitnessAge ?? "",
         day_tags: (dy?.tags || []).join(" | "), day_note: dy?.note ?? "", steps: dy?.steps ?? "",
         workouts: ses.map((s) => `${s.kind}:${s.type || ""}`).join(" | "),
         run_distance: round(toUnit(sum(ses.filter((s) => s.kind === "run").map((s) => s.distanceKm || 0)), settings.distanceUnit), 2) || "",
@@ -2397,7 +2420,7 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
   };
 
   const hints = {
-    garmin: "Garmin Connect on the web: Reports, Sleep, set the date range, Export CSV. Score, duration, resting HR, body battery and bedtime are read if present; the rest is ignored.",
+    garmin: "Garmin has no sleep CSV of its own, so use the converter built for this: drop the sleepData.json files from your Garmin export into it and import the CSV it writes. Score, duration, resting HR, body battery, bedtime, VO₂ max and fitness age are all read if present.",
     garminact: `Garmin Connect on the web: Activities, All Activities, then Export CSV at the top right. Only runs are read. Distance is taken in ${settings.distanceUnit}, matching your Garmin display unit; switch the unit above first if yours differs.`,
     strava: "Strava on the web: Settings, My Account, Download or Delete Your Account, request the archive. Use activities.csv when it arrives. Slow, but complete.",
     strong: "Strong app: Settings, Export Data. It emails you a CSV of every set. Sets roll up into one lift session per workout.",
@@ -2825,6 +2848,13 @@ function withDefaults(st) {
     if (!s.presets.some((p) => p.kind === "stimulant")) {
       s.presets = [...s.presets, ...DEFAULT_SETTINGS.presets.filter((p) => p.kind === "stimulant")];
     }
+    s.presets = s.presets.map((p) => (p.id === "c1" ? { ...p, label: "Americano", amount: 128 }
+      : p.id === "c4" ? { ...p, label: "Matcha", amount: 70 } : p));
+    for (const id of ["a5", "w7"]) {
+      if (!s.presets.some((p) => p.id === id)) {
+        s.presets = [...s.presets, DEFAULT_SETTINGS.presets.find((p) => p.id === id)];
+      }
+    }
   }
   return s;
 }
@@ -2944,17 +2974,21 @@ export default function HealthLog({ email, onSignOut }) {
         {tab !== "log" && tab !== "data" && <RangeBar value={range} onChange={setRange} />}
 
         {tab === "log" && (
+          <Boundary where="The log sheet">
           <Log dayKey={dayKey} setDayKey={setDayKey} doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings}
                addDose={addDose} removeDose={removeDose} upsertSleep={upsertSleep} addSession={addSession} removeSession={removeSession} upsertDay={upsertDay} />
+          </Boundary>
         )}
-        {tab === "overview" && <Overview doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} goLog={goLog} />}
-        {tab === "sleep" && <SleepDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} />}
-        {tab === "training" && <TrainingDash sessions={sessions} days={days} doses={doses} sleep={sleep} settings={settings} setSettings={setSettings} range={range} />}
-        {tab === "intake" && <IntakeDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} />}
+        {tab === "overview" && <Boundary where="Overview"><Overview doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} goLog={goLog} /></Boundary>}
+        {tab === "sleep" && <Boundary where="Sleep"><SleepDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
+        {tab === "training" && <Boundary where="Training"><TrainingDash sessions={sessions} days={days} doses={doses} sleep={sleep} settings={settings} setSettings={setSettings} range={range} /></Boundary>}
+        {tab === "intake" && <Boundary where="Intake"><IntakeDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
         {tab === "data" && (
+          <Boundary where="The data tab">
           <Data state={{ doses, sleep, sessions: manualSessions, lifts, days, settings }} setSleep={setSleep} setSessions={setManualSessions}
                 setLifts={setLifts} setDoses={setDoses} setDays={setDays} settings={settings} setSettings={setSettings}
                 resetAll={resetAll} storageOk={storageOk} />
+          </Boundary>
         )}
       </div>
     </div>

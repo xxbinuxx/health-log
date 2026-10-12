@@ -11,3 +11,9 @@
   from = "/*"
   to = "/index.html"
   status = 200
+  
+# The morning brief. Cron is UTC, so it runs at both candidate hours and the
+# function itself only sends when the clock in New York says 6am. That keeps it
+# at 6am through daylight saving without any seasonal edits.
+[functions."daily-brief"]
+  schedule = "0 10,11 * * *"

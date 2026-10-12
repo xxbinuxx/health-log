@@ -21,6 +21,14 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
 
   const y = addDays(todayKey, -1);
   const yd = daily.get(y);
+
+  // resting HR against its own recent baseline: a lift of a few beats is worth a mention
+  const rhrOf = (k) => daily.get(k).sleep?.restingHr ?? null;
+  const rhrWeek = lastNDays(7, y).map(rhrOf).filter((v) => v != null);
+  const rhrBase = lastNDays(28, addDays(y, -7)).map(rhrOf).filter((v) => v != null);
+  const rhrNow = rhrWeek.length ? avg(rhrWeek) : null;
+  const rhrNorm = rhrBase.length >= 5 ? median(rhrBase) : null;
+  const rhrUp = rhrNow != null && rhrNorm != null ? round(rhrNow - rhrNorm, 1) : null;
   // a rolling seven days is the honest read; on a Monday the calendar week is always near zero
   const roll7 = lastNDays(7, addDays(todayKey, -1));
   const rollMi = round(toUnit(sum(roll7.map((k) => daily.get(k).runKm)), u), 1) ?? 0;
@@ -59,6 +67,9 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
       : (good ? ", near your lowest" : ", about as quiet as it gets");
     return `${r ?? raw}${r != null ? ` of 100` : ""}${word} (raw ${raw})`;
   };
+  if (rhrUp != null && Math.abs(rhrUp) >= 2) {
+    lines.push(`Resting HR is averaging ${Math.round(rhrNow)} over the last week, ${Math.abs(rhrUp)} ${rhrUp > 0 ? "above" : "below"} your baseline of ${rhrNorm}.`);
+  }
   lines.push(`Regen ${band("regen", true)}.` + (yd.sleep?.score != null
     ? ` Last night ${yd.sleep.score}${yd.sleep.asleepMin ? ` on ${minsToHM(yd.sleep.asleepMin)}` : ""}.`
     : " No sleep score logged for last night."));
@@ -89,6 +100,9 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
   } else if (raceDays != null && raceDays >= 0 && raceDays <= 10) {
     plan = raceDays <= 2 ? "Shake-out only, 20 to 30 minutes." : raceDays <= 5 ? "Short and sharp, well short of exhaustion." : "Hold the volume down, keep one quality session in.";
     why = `${raceDays} day${raceDays === 1 ? "" : "s"} to ${s.race?.name || "race day"}.`;
+  } else if (rhrUp != null && rhrUp >= 4) {
+    plan = "Easy, or take the day off.";
+    why = `Resting HR is ${rhrUp} beats above your baseline, which usually means fatigue or something coming on.`;
   } else if (lastHard != null && lastHard <= 1) {
     plan = "Easy recovery run.";
     why = "Yesterday was long or hard.";

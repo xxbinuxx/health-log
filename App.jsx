@@ -1704,6 +1704,13 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
   const scores = scored.map((r) => r.score);
   const hoursArr = rows.filter((r) => r.hours != null).map((r) => r.hours);
   const rhrArr = rows.filter((r) => r.rhr != null).map((r) => r.rhr);
+  // a week against the rest of the window: a lift of a few beats is the classic sign of
+  // accumulated fatigue, a poor night, or something coming on
+  const rhrLast7 = rows.slice(-7).map((r) => r.rhr).filter((v) => v != null);
+  const rhrBase = rows.slice(0, -7).map((r) => r.rhr).filter((v) => v != null);
+  const rhrNow = rhrLast7.length ? avg(rhrLast7) : null;
+  const rhrNorm = rhrBase.length >= 5 ? median(rhrBase) : null;
+  const rhrDelta = rhrNow != null && rhrNorm != null ? round(rhrNow - rhrNorm, 1) : null;
   const bbArr = rows.filter((r) => r.bb != null).map((r) => r.bb);
   const bedArr = rows.filter((r) => r.bed != null).map((r) => r.bed);
 
@@ -1746,6 +1753,12 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
                   sub={hoursArr.length ? `${hoursArr.filter((h) => h >= settings.sleepHoursGoal).length} of ${hoursArr.length} hit ${settings.sleepHoursGoal}h` : ""} />
             <Stat v={rhrArr.length ? Math.round(avg(rhrArr)) : null} l="avg resting HR" color={HEX.rhr}
                   sub={rhrArr.length ? `${Math.min(...rhrArr)}–${Math.max(...rhrArr)} range` : ""} />
+            <Stat v={rhrNow != null ? Math.round(rhrNow) : null} l="resting HR, last 7 nights"
+                  color={rhrDelta == null ? HEX.rhr : rhrDelta >= 3 ? HEX.alert : rhrDelta <= -2 ? HEX.run : HEX.rhr}
+                  sub={rhrDelta == null ? "needs a longer window"
+                    : rhrDelta >= 3 ? `${rhrDelta} above your baseline of ${rhrNorm} — worth noticing`
+                    : rhrDelta <= -2 ? `${Math.abs(rhrDelta)} below your baseline of ${rhrNorm}`
+                    : `in line with your baseline of ${rhrNorm}`} />
             <Stat v={bbArr.length ? Math.round(avg(bbArr)) : null} l="avg body battery on waking" color={HEX.hours}
                   sub={bbArr.length ? `${Math.min(...bbArr)}–${Math.max(...bbArr)} range` : "add it on the Log tab"} />
             <Stat v={bedArr.length ? fmtBedtime(avg(bedArr)) : null} l="avg bedtime" color={HEX.sleep}
@@ -1770,11 +1783,13 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
               <Bar yAxisId="hours" dataKey="hours" name="Hours" fill={HEX.hours} opacity={0.35} radius={[2, 2, 0, 0]} />
               <Line yAxisId="score" type="monotone" dataKey="score" name="Score" stroke={HEX.sleep} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
               <Line yAxisId="score" type="monotone" dataKey="bb" name="Body battery" stroke={HEX.hours} strokeWidth={1.5} strokeDasharray="4 3" dot={false} connectNulls />
+              <Line yAxisId="score" type="monotone" dataKey="rhr" name="Resting HR" stroke={HEX.rhr} strokeWidth={1.8} strokeDasharray="1 3" dot={false} connectNulls />
             </ComposedChart>
           </Chart>
           <div className="legend">
             <span><i style={{ background: HEX.sleep }} />score (left, dashed = goal)</span>
             <span><i style={{ background: HEX.hours }} />body battery on waking (left, dashed)</span>
+            <span><i style={{ background: HEX.rhr }} />resting HR (left, dotted) — it usually moves opposite the score</span>
             <span><i style={{ background: HEX.hours, opacity: 0.5 }} />hours (right)</span>
           </div>
         </div>
@@ -1791,10 +1806,12 @@ function SleepDash({ doses, sleep, sessions, days: dayRecs, settings, range }) {
                   <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
                   <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={axisTick()} tickLine={false} axisLine={false} />
                   <Tooltip content={<Tip />} />
+                  {rhrNorm != null && <ReferenceLine y={rhrNorm} stroke={HEX.rhr} strokeDasharray="3 4" opacity={0.6} />}
                   <Line type="monotone" dataKey="rhr" name="RHR" stroke={HEX.rhr} strokeWidth={2} dot={range <= 31 ? { r: 2.5 } : false} connectNulls />
                 </LineChart>
               </Chart>
             ) : <p className="empty">Add resting HR on the Log tab and it will chart here.</p>}
+            {rhrNorm != null && <p className="note" style={{ marginTop: 6 }}>Dashed line is your baseline for this window, {rhrNorm} bpm.</p>}
             {rRhr != null && <p className="note" style={{ marginTop: 6 }}>RHR against score: {rWord(rRhr)} (r = {round(rRhr, 2)}).</p>}
           </div>
         </div>

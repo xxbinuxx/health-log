@@ -6,7 +6,7 @@ import {
   rollup, buildIndices, lastNDays, addDays, toDayKey, mondayOf, relToMedian,
   median, avg, sum, round, toUnit, secsToClock, fmtShort,
 } from "../../scores.js";
-import { assessFitness, riegel, paces } from "../../plan.js";
+import { assessFitness, riegel, paces, buildPlan, raceType } from "../../plan.js";
 
 const KEYS = { doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions", days: "hl2:days", settings: "hl2:settings", spend: "hl2:spend" };
 
@@ -101,19 +101,49 @@ export function digest(state, todayKey) {
     prediction_basis: fit.best ? `${fit.best.miles} mi on ${fit.best.date}` : null,
     goal_paces_if_target: null,
   };
-  if (state.settings?.race?.goalTime) {
-    const parts = String(state.settings.race.goalTime).split(":").map(Number);
-    const sec = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
+  // the race, the plan and how it is actually going — the questions people ask most
+  let plan = null;
+  const r = state.settings?.race;
+  if (r?.goalTime && r?.date) {
+    const parts = String(r.goalTime).split(":").map(Number);
+    const sec = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts.length === 2 ? parts[0] * 60 + parts[1] : null;
+    const T = raceType(r.kind);
     if (sec) {
-      const P = paces(sec);
+      const P = paces(sec, T.miles);
       fitness.goal_paces_if_target = Object.fromEntries(Object.entries(P).map(([k, v]) => [k, secsToClock(v)]));
-      fitness.goal_race = { name: state.settings.race.name || "race", date: state.settings.race.date, goal: state.settings.race.goalTime };
+      try {
+        const built = buildPlan({ todayKey, startKey: state.settings.planStart, raceDate: r.date, raceName: r.name,
+          raceKind: r.kind, goalSeconds: sec, daily, settings: s });
+        const done = built.weeks.filter((w) => w.status === "done");
+        const doneMi = round(sum(done.map((w) => w.doneMiles || 0)), 1);
+        const plannedMi = round(sum(done.map((w) => w.plannedSoFar || 0)), 1);
+        plan = {
+          race: r.name || T.name, distance: T.name, distance_miles: T.miles, date: r.date,
+          days_out: Math.max(0, Math.round((new Date(r.date) - new Date(todayKey)) / 864e5)),
+          weeks_out: Math.max(0, Math.floor((new Date(r.date) - new Date(todayKey)) / 864e5 / 7)),
+          goal_time: r.goalTime, goal_pace: secsToClock(P.race),
+          equivalent_today: built.predicted.seconds ? secsToClock(built.predicted.seconds) : null,
+          prediction_basis: built.predicted.basis,
+          verdict: built.goal.verdict,
+          plan_weeks: built.weeks.length,
+          big_long_runs_planned: built.twenties, big_long_run_distance: T.peakLong,
+          weeks_completed: done.length,
+          miles_done_vs_planned: plannedMi ? `${doneMi} of ${plannedMi}` : null,
+          adherence_pct: plannedMi ? Math.round((doneMi / plannedMi) * 100) : null,
+          longest_completed_in_plan: done.length ? Math.max(0, ...done.map((w) => w.longestDone || 0)) : null,
+          this_week: (built.weeks.find((w) => w.days.some((d) => d.date >= todayKey) && w.days.some((d) => d.date <= todayKey))
+            || built.weeks.find((w) => w.days.some((d) => d.date >= todayKey)))
+            ?.days?.map((d) => `${d.dow}: ${d.title}${d.miles ? ` ${d.miles} mi` : ""}`) ?? null,
+          notes: built.goal.notes,
+        };
+      } catch (e) { console.error("ask/plan:", e?.message || e); }
     }
   }
 
   return {
     today: todayKey,
     fitness,
+    race_plan: plan,
     units: { distance: u, weekly_distance_target: s.weeklyDistanceTarget, sleep_score_goal: s.sleepScoreGoal ?? 80 },
     last_7: window(7), last_30: window(30), last_90: window(90), last_365: window(365),
     by_weekday_90d: weekday,
@@ -139,6 +169,7 @@ How to answer:
 - Lead with the answer, then the evidence.
 - Flag small samples (under about ten days) as shaky.
 - When the question is about fitness or capability, use predicted_race_times, typical_pace, vo2_max, weekly mileage and longest run together. Say plainly when the data is too thin to judge.
+- When there is a race_plan, answer against it: how far out the race is, whether the training is tracking, what this week asks for, and whether the target still looks reachable.
 - Be honest when the numbers suggest a goal is unrealistic or the training is insufficient. Do not flatter.
 
 Boundaries:

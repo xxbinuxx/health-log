@@ -510,6 +510,22 @@ const CSS = `
 /* small shared bits                                                  */
 /* ================================================================== */
 
+/* Calls one of our Netlify functions with the signed-in session attached. */
+async function callFn(path, { method = "GET", body } = {}) {
+  const { data } = await supabase.auth.getSession();
+  const r = await fetch(path, {
+    method,
+    headers: {
+      Authorization: `Bearer ${data.session?.access_token ?? ""}`,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const j = await r.json().catch(() => ({ error: "The server did not reply. Is the latest version deployed?" }));
+  if (!r.ok || j.error) throw new Error(j.error || `Request failed (${r.status})`);
+  return j;
+}
+
 /* One panel throwing must not take the whole app down — especially between deploys. */
 class Boundary extends React.Component {
   constructor(p) { super(p); this.state = { err: null }; }
@@ -570,6 +586,120 @@ function Chart({ h = 180, children }) {
 /* ================================================================== */
 /* Log — the one-sheeter                                              */
 /* ================================================================== */
+
+/* Say what you did; confirm what it heard. Nothing is written until you accept it. */
+function VoiceLog({ dayKey, settings, onApply }) {
+  const [state, setState] = useState("idle");   // idle | recording | working | review | error
+  const [msg, setMsg] = useState("");
+  const [result, setResult] = useState(null);
+  const rec = useRef(null), chunks = useRef([]);
+
+  const supported = typeof window !== "undefined" && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== "undefined";
+
+  const stop = () => { try { rec.current?.stop(); } catch {} };
+
+  const start = async () => {
+    setMsg(""); setResult(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "audio/mp4";
+      const r = new MediaRecorder(stream, { mimeType: mime });
+      chunks.current = [];
+      r.ondataavailable = (e) => e.data.size && chunks.current.push(e.data);
+      r.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setState("working");
+        try {
+          const blob = new Blob(chunks.current, { type: mime });
+          const b64 = await new Promise((res, rej) => {
+            const fr = new FileReader();
+            fr.onload = () => res(String(fr.result).split(",")[1]);
+            fr.onerror = rej; fr.readAsDataURL(blob);
+          });
+          const j = await callFn("/.netlify/functions/voice-log", {
+            method: "POST",
+            body: { audio: b64, mime, unit: settings.distanceUnit, presets: settings.presets },
+          });
+          if (!j.parsed) { setState("error"); setMsg(j.error || "Nothing was heard."); return; }
+          setResult(j); setState("review");
+        } catch (e) { setState("error"); setMsg(String(e.message || e)); }
+      };
+      rec.current = r; r.start(); setState("recording");
+      setTimeout(() => { if (r.state === "recording") r.stop(); }, 60000);   // hard stop at a minute
+    } catch (e) { setState("error"); setMsg("Could not reach the microphone. Check the browser's permission."); }
+  };
+
+  if (!supported) return null;
+
+  const p = result?.parsed;
+  const nothing = p && !p.intake?.length && !p.workout && !p.sleep && !p.tags?.length && !p.note;
+
+  return (
+    <div className="panel">
+      <h2>Say it <span className="hint">speak a sentence; you confirm before anything is saved</span></h2>
+      <div className="body">
+        {state !== "review" && (
+          <>
+            <div className="row">
+              {state === "recording" ? (
+                <button className="solid" onClick={stop} style={{ background: "var(--alert)" }}>Stop and read it back</button>
+              ) : (
+                <button className="solid" onClick={start} disabled={state === "working"}>
+                  {state === "working" ? "Listening back…" : "Record"}
+                </button>
+              )}
+              <span className="note" style={{ color: state === "error" ? "var(--alert)" : "var(--soft)" }}>
+                {state === "recording" ? "Recording — tap stop when you're done."
+                  : state === "working" ? "Transcribing…"
+                  : msg || "Try: two beers, a zyn, ran six miles easy at eight thirty pace."}
+              </span>
+            </div>
+          </>
+        )}
+
+        {state === "review" && p && (
+          <>
+            <p className="note" style={{ marginBottom: 10 }}>Heard: <span style={{ color: "var(--ink)" }}>"{result.transcript}"</span></p>
+            {nothing ? <p className="empty">Nothing in that mapped to an entry.</p> : (
+              <table style={{ marginBottom: 10 }}>
+                <tbody>
+                  {p.sleep && (p.sleep.score != null || p.sleep.hours != null) && (
+                    <tr><td style={{ width: 88, color: "var(--soft)" }}>sleep</td>
+                      <td>{[p.sleep.score != null ? `score ${p.sleep.score}` : null, p.sleep.hours != null ? `${p.sleep.hours}h` : null,
+                           p.sleep.restingHr != null ? `RHR ${p.sleep.restingHr}` : null, p.sleep.bodyBattery != null ? `battery ${p.sleep.bodyBattery}` : null,
+                           p.sleep.bedtime || null].filter(Boolean).join(" · ")}</td></tr>
+                  )}
+                  {p.workout && (
+                    <tr><td style={{ color: "var(--soft)" }}>workout</td>
+                      <td><span className={`tag ${p.workout.kind}`}>{p.workout.type || p.workout.kind}</span>{" "}
+                        {[p.workout.distance ? `${p.workout.distance} ${settings.distanceUnit}` : null, p.workout.pace || null, p.workout.note || null].filter(Boolean).join(" · ")}</td></tr>
+                  )}
+                  {(p.intake || []).map((i, n) => (
+                    <tr key={n}><td style={{ color: "var(--soft)" }}>{n === 0 ? "intake" : ""}</td>
+                      <td><span style={{ color: KIND_META[i.kind]?.color, marginRight: 6 }}>●</span>{i.label} — {i.amount} {i.unit}</td></tr>
+                  ))}
+                  {(p.tags?.length || p.note) && (
+                    <tr><td style={{ color: "var(--soft)" }}>day</td>
+                      <td>{(p.tags || []).map((t) => <span key={t} className="tag" style={{ background: "var(--sleep)", marginRight: 4 }}>{t}</span>)}{p.note}</td></tr>
+                  )}
+                </tbody>
+              </table>
+            )}
+            {p.unclear?.length > 0 && (
+              <p className="note flag" style={{ marginBottom: 10 }}>Assumed: {p.unclear.join(" · ")}</p>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="solid" onClick={() => { onApply(p); setState("idle"); setResult(null); }} disabled={nothing}>
+                Add to {dayKey === toDayKey(new Date()) ? "today" : fmtShort(dayKey)}
+              </button>
+              <button className="ghost" onClick={() => { setState("idle"); setResult(null); }}>Discard</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDose, removeDose, upsertSleep, addSession, removeSession, upsertDay }) {
   const today = toDayKey(new Date());
@@ -676,6 +806,42 @@ function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDos
     } else ts = stamp();
     addDose({ id: uid(), ts: ts.toISOString(), kind: cKind, label: cLabel.trim(), amount: amt, unit: cUnit });
     setCLabel(""); setCAmt(""); setCTime("");
+  };
+
+  // everything the voice note produced goes through the same writers as the buttons do
+  const applyVoice = (p) => {
+    for (const i of p.intake || []) {
+      if (!i || !KIND_META[i.kind] || !i.amount) continue;
+      addDose({ id: uid(), ts: stamp().toISOString(), kind: i.kind, label: String(i.label || i.kind).slice(0, 60),
+        amount: Number(i.amount), unit: i.unit || "mg" });
+    }
+    if (p.workout?.kind) {
+      const w = p.workout;
+      const ts = noonOf(dayKey).getTime();
+      const base = { id: uid(), date: dayKey, ts, kind: w.kind, type: w.type || "", note: (w.note || "").slice(0, 120), source: "manual" };
+      if (w.kind === "run") {
+        const distUnits = Number(w.distance) || null;
+        const distKm = distUnits ? fromUnit(distUnits, settings.distanceUnit) : null;
+        const paceSec = parsePace(w.pace);
+        addSession({ ...base, name: `${(w.type || "Easy")} run`,
+          distanceKm: distKm ? round(distKm, 3) : null,
+          movingSec: paceSec && distUnits ? Math.round(paceSec * distUnits) : null,
+          paceSecPerKm: paceSec ? round(settings.distanceUnit === "mi" ? paceSec / KM_PER_MI : paceSec, 1) : null });
+      } else if (w.kind === "lift") addSession({ ...base, name: `${w.type || "Lift"} day` });
+      else addSession({ ...base, name: "Rest day" });
+    }
+    if (p.sleep && (p.sleep.score != null || p.sleep.hours != null || p.sleep.restingHr != null || p.sleep.bodyBattery != null || p.sleep.bedtime)) {
+      upsertSleep({ date: dayKey,
+        score: p.sleep.score ?? sleepRec?.score ?? null,
+        asleepMin: p.sleep.hours != null ? Math.round(Number(p.sleep.hours) * 60) : sleepRec?.asleepMin ?? null,
+        restingHr: p.sleep.restingHr ?? sleepRec?.restingHr ?? null,
+        bodyBattery: p.sleep.bodyBattery ?? sleepRec?.bodyBattery ?? null,
+        bedtime: p.sleep.bedtime ? parseBedtime(p.sleep.bedtime) : sleepRec?.bedtime ?? null });
+    }
+    if (p.tags?.length || p.note) {
+      const known = (p.tags || []).filter((t) => settings.dayTags.includes(t));
+      upsertDay({ date: dayKey, tags: [...new Set([...tags, ...known])], note: p.note ? String(p.note).slice(0, 200) : dayRec?.note || "" });
+    }
   };
 
   const sumKind = (k) => dayDoses.filter((d) => d.kind === k).reduce((a, b) => a + b.amount, 0);
@@ -798,6 +964,8 @@ function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDos
           </div>
         </div>
       </div>
+
+      <VoiceLog dayKey={dayKey} settings={settings} onApply={applyVoice} />
 
       {/* ---------------- Day ---------------- */}
       <div className="panel">
@@ -1064,6 +1232,8 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
     <>
       <ScoreTrio daily={daily} settings={settings} range={range} />
 
+      <AskPanel />
+
       <div className="panel">
         <h2>Last 7 days <span className="hint">{logged30} of the last 30 days have something logged</span></h2>
         <div className="body">
@@ -1238,6 +1408,48 @@ function ScoreLines({ chart, keys, band, range, h = 220 }) {
         ))}
       </LineChart>
     </Chart>
+  );
+}
+
+/* Ask a question of your own log. */
+function AskPanel() {
+  const [q, setQ] = useState("");
+  const [a, setA] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const ask = async (text) => {
+    const question = (text ?? q).trim();
+    if (!question) return;
+    setBusy(true); setErr(""); setA(null); setQ(question);
+    try { const j = await callFn("/.netlify/functions/ask", { method: "POST", body: { question } }); setA(j.answer); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  const examples = ["What happens to my sleep after a heavy night?", "Which weekday is my worst?", "Am I running more or less than last month?"];
+
+  return (
+    <div className="panel">
+      <h2>Ask <span className="hint">answered only from your own numbers</span></h2>
+      <div className="body">
+        <div className="row">
+          <label className="f" style={{ flex: 1, minWidth: 200 }}>
+            <input value={q} placeholder="Why was last week worse than usual?"
+                   onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && ask()} />
+          </label>
+          <button className="solid" onClick={() => ask()} disabled={busy || !q.trim()}>{busy ? "Thinking…" : "Ask"}</button>
+        </div>
+        {!a && !err && !busy && (
+          <div className="chips" style={{ marginTop: 10 }}>
+            {examples.map((x) => <button key={x} className="tchip" onClick={() => ask(x)}>{x}</button>)}
+          </div>
+        )}
+        {err && <p className="note flag" style={{ marginTop: 10 }}>{err}</p>}
+        {a && <p className="note" style={{ marginTop: 12, color: "var(--ink)", fontSize: 13.5, lineHeight: 1.6 }}>{a}</p>}
+        {a && <p className="note" style={{ marginTop: 8, color: "var(--faint)" }}>Written by a model from figures this app computed. It can misread them — check anything surprising against the charts.</p>}
+      </div>
+    </div>
   );
 }
 

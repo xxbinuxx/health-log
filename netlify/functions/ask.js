@@ -6,6 +6,7 @@ import {
   rollup, buildIndices, lastNDays, addDays, toDayKey, mondayOf, relToMedian,
   median, avg, sum, round, toUnit, secsToClock, fmtShort,
 } from "../../scores.js";
+import { assessFitness, riegel, paces } from "../../plan.js";
 
 const KEYS = { doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions", days: "hl2:days", settings: "hl2:settings", spend: "hl2:spend" };
 
@@ -80,8 +81,39 @@ export function digest(state, todayKey) {
     return g.length ? { nights: g.length, avg_sleep_score: round(avg(g), 1) } : null;
   };
 
+  // What the numbers imply about fitness, computed here so the model never has to.
+  const fit = assessFitness(daily, s, todayKey);
+  const race = (() => {
+    if (!fit.best) return null;
+    const d = [["5K", 3.107], ["10K", 6.214], ["half", 13.109], ["marathon", 26.2]];
+    return Object.fromEntries(d.map(([k, mi]) => [k, secsToClock(riegel(fit.best.seconds, fit.best.miles, mi))]));
+  })();
+  const fitness = {
+    weekly_miles_recent: fit.recentWeekly,
+    weekly_miles_peak_12w: fit.peakWeekly,
+    longest_run_90d: fit.longest,
+    longest_run_date: fit.longestDate,
+    typical_pace: fit.medPace ? secsToClock(fit.medPace) : null,
+    vo2_max: fit.vo2,
+    runs_per_week: fit.runDaysPerWeek,
+    lifts_per_week: fit.liftDaysPerWeek,
+    predicted_race_times: race,
+    prediction_basis: fit.best ? `${fit.best.miles} mi on ${fit.best.date}` : null,
+    goal_paces_if_target: null,
+  };
+  if (state.settings?.race?.goalTime) {
+    const parts = String(state.settings.race.goalTime).split(":").map(Number);
+    const sec = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
+    if (sec) {
+      const P = paces(sec);
+      fitness.goal_paces_if_target = Object.fromEntries(Object.entries(P).map(([k, v]) => [k, secsToClock(v)]));
+      fitness.goal_race = { name: state.settings.race.name || "race", date: state.settings.race.date, goal: state.settings.race.goalTime };
+    }
+  }
+
   return {
     today: todayKey,
+    fitness,
     units: { distance: u, weekly_distance_target: s.weeklyDistanceTarget, sleep_score_goal: s.sleepScoreGoal ?? 80 },
     last_7: window(7), last_30: window(30), last_90: window(90), last_365: window(365),
     by_weekday_90d: weekday,
@@ -95,15 +127,24 @@ export function digest(state, todayKey) {
   };
 }
 
-const SYSTEM = `You answer questions about one person's own health and training log.
+const SYSTEM = `You are a knowledgeable endurance coach reading one person's own training log. You know exercise physiology — aerobic base, threshold, recovery, training load, how alcohol and short sleep affect adaptation — and you use that knowledge to interpret what you see.
 
-Rules:
-1. Use only the figures in the JSON. Never calculate, estimate or infer a number that is not there. If the data cannot answer the question, say so plainly and name what is missing.
-2. Quote figures exactly as given, with their units.
-3. Two to five sentences. Direct and specific. No bullet points unless comparing three or more things.
-4. Point out when a sample is small (under about 10 days) and the answer is therefore shaky.
-5. Report intake factually. Do not moralise, do not diagnose, do not give medical advice.
-6. If asked something the log has no bearing on, say that rather than guessing.`;
+How to handle numbers:
+- Every figure in the JSON was computed by the app. Quote those exactly, with units.
+- Do not perform arithmetic on them and do not state a number that is not there. If a number would help and is absent, say what is missing.
+- You may reason qualitatively beyond the numbers: what a pattern usually means, what typically causes it, what tends to help. Make clear when you are drawing on general knowledge rather than their data, with wording like "generally" or "for most runners".
+
+How to answer:
+- Two to six sentences. Specific and direct, like a coach who has read the file. No preamble.
+- Lead with the answer, then the evidence.
+- Flag small samples (under about ten days) as shaky.
+- When the question is about fitness or capability, use predicted_race_times, typical_pace, vo2_max, weekly mileage and longest run together. Say plainly when the data is too thin to judge.
+- Be honest when the numbers suggest a goal is unrealistic or the training is insufficient. Do not flatter.
+
+Boundaries:
+- Report drinking and cannabis factually in terms of training effect. Never moralise.
+- You are not a doctor. Never diagnose, never interpret symptoms as a condition, and if something sounds medical, say it is worth asking a professional.
+- If the log has no bearing on the question, say so rather than inventing a connection.`;
 
 export async function handler(event) {
   try {

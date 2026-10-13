@@ -4,7 +4,7 @@ import { store } from "./storage";
 import { supabase } from "./supabase";
 import { parseNotes } from "./notesImport";
 import { parseRocketMoney, resolveBuckets, spendByDay, SPEND_BUCKETS, DEFAULT_SPEND_SETTINGS } from "./spendImport";
-import { buildPlan, DEFAULT_PREFS } from "./plan";
+import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType } from "./plan";
 import {
   pad, KM_PER_MI, toUnit, fromUnit, round, clamp, avg, sum,
   toDayKey, fromDayKey, addDays, mondayOf, dayKeyFor, lastNDays,
@@ -46,7 +46,7 @@ const DEFAULT_SETTINGS = {
   planPrefs: { ...DEFAULT_PREFS },
   currency: "$",
   dayTags: ["normal", "social", "date", "travel", "work late", "sick", "family"],
-  race: { name: "", date: "", goalTime: "" },
+  race: { name: "", date: "", goalTime: "", kind: "marathon" },
   presets: [
     { id: "c1", kind: "caffeine", label: "Americano", amount: 128, unit: "mg" },
     { id: "c2", kind: "caffeine", label: "Espresso", amount: 64, unit: "mg" },
@@ -2594,9 +2594,9 @@ function Calendar({ daily, settings, setSettings }) {
 
   const plan = useMemo(() => {
     if (!ready) return null;
-    try { return buildPlan({ todayKey: today, startKey: settings.planStart, raceDate: race.date, raceName: race.name, goalSeconds: goalSec, daily, settings }); }
+    try { return buildPlan({ todayKey: today, startKey: settings.planStart, raceDate: race.date, raceName: race.name, raceKind: race.kind, goalSeconds: goalSec, daily, settings }); }
     catch (e) { console.error("plan:", e); return null; }
-  }, [ready, race.date, race.name, goalSec, daily, settings, today]);
+  }, [ready, race.date, race.name, race.kind, goalSec, daily, settings, today]);
 
   // anchor the plan the first time it is viewed, so the calendar keeps its history
   useEffect(() => {
@@ -2615,10 +2615,20 @@ function Calendar({ daily, settings, setSettings }) {
         <div className="row">
           <label className="f" style={{ flex: 1, minWidth: 130 }}>Race<input value={race.name || ""} placeholder="CIM" onChange={(e) => setRace({ name: e.target.value })} /></label>
           <label className="f" style={{ width: 150 }}>Date<input type="date" value={race.date || ""} onChange={(e) => setRace({ date: e.target.value })} /></label>
-          <label className="f" style={{ width: 112 }}>Goal<input value={race.goalTime || ""} placeholder="3:15:00" onChange={(e) => setRace({ goalTime: e.target.value })} /></label>
+          <label className="f" style={{ width: 118 }}>Distance
+            <select value={race.kind || "marathon"} onChange={(e) => setRace({ kind: e.target.value })}>
+              {Object.entries(RACE_TYPES).map(([k, t]) => <option key={k} value={k}>{t.name}</option>)}
+            </select>
+          </label>
+          <label className="f" style={{ width: 116 }}>Target time<input value={race.goalTime || ""} placeholder={raceType(race.kind).miles > 20 ? "3:15:00" : "19:30"} onChange={(e) => setRace({ goalTime: e.target.value })} /></label>
         </div>
         <div className="row" style={{ marginTop: 10 }}>
-          <label className="f" style={{ width: 128 }}>Previous best<input value={settings.priorRace?.time || ""} placeholder="3:20:00" onChange={(e) => setPrior({ time: e.target.value })} /></label>
+          <label className="f" style={{ width: 116 }}>Previous best<input value={settings.priorRace?.time || ""} placeholder="3:20:00" onChange={(e) => setPrior({ time: e.target.value })} /></label>
+          <label className="f" style={{ width: 104 }}>over
+            <select value={settings.priorRace?.distanceMi ?? 26.2} onChange={(e) => setPrior({ distanceMi: Number(e.target.value) })}>
+              {Object.values(RACE_TYPES).map((t) => <option key={t.name} value={t.miles}>{t.name}</option>)}
+            </select>
+          </label>
           <label className="f" style={{ width: 150 }}>When<input type="date" value={settings.priorRace?.date || ""} onChange={(e) => setPrior({ date: e.target.value })} /></label>
           <label className="f" style={{ width: 128 }}>Long run day
             <select value={prefs.longRunDays[0]} onChange={(e) => {
@@ -2628,15 +2638,16 @@ function Calendar({ daily, settings, setSettings }) {
               <option value={0}>Sunday</option><option value={6}>Saturday</option><option value={5}>Friday</option>
             </select>
           </label>
-          <label className="f" style={{ width: 118 }}>Twenties wanted
-            <input value={prefs.twentyTarget} inputMode="numeric" onChange={(e) => setPrefs({ twentyTarget: Math.max(0, Math.min(4, Number(e.target.value) || 0)) })} />
+          <label className="f" style={{ width: 130 }}>Big long runs wanted
+            <input value={prefs.twentyTarget ?? ""} inputMode="numeric" placeholder={String(raceType(race.kind).bigTarget)}
+                   onChange={(e) => setPrefs({ twentyTarget: e.target.value === "" ? null : Math.max(0, Math.min(5, Number(e.target.value) || 0)) })} />
           </label>
           <label className="f" style={{ width: 148 }}>Plan started
             <input type="date" value={settings.planStart || ""} onChange={(e) => setSettings({ ...settings, planStart: e.target.value || null })} />
           </label>
         </div>
         <p className="note" style={{ marginTop: 8 }}>
-          Intervals stay on Tuesday. A previous marathon time predicts far better than training runs do, so fill it in if you have one.
+          Intervals stay on Tuesday. A previous race predicts far better than training runs do, so fill it in if you have one — any distance works, it gets converted.
         </p>
       </div>
     </div>
@@ -2661,19 +2672,39 @@ function Calendar({ daily, settings, setSettings }) {
       {Setup}
 
       <div className="panel">
-        <h2>{plan.raceName || "Race"} in {Math.max(0, Math.round((fromDayKey(plan.raceDate) - fromDayKey(today)) / 864e5))} days
-          <span className="hint">{plan.weeks.length} weeks · {plan.twenties} × 20 {u} · goal pace {secsToClock(plan.paces.marathon)}/{u}</span>
+        <h2>{plan.raceName || plan.type.name} · {(() => {
+            const d = Math.max(0, Math.round((fromDayKey(plan.raceDate) - fromDayKey(today)) / 864e5));
+            const wk = Math.floor(d / 7), rem = d % 7;
+            return d === 0 ? "race day" : wk >= 1 ? `${wk} week${wk === 1 ? "" : "s"}${rem ? ` ${rem}d` : ""} to go` : `${d} day${d === 1 ? "" : "s"} to go`;
+          })()}
+          <span className="hint">{plan.type.name} · {plan.weeks.length} weeks{plan.twenties ? ` · ${plan.twenties} × ${plan.type.peakLong} ${u}` : ""} · race pace {secsToClock(plan.paces.race)}/{u}</span>
         </h2>
         <div className="body">
           <div className="grid4" style={{ gap: 12, marginBottom: 12 }}>
             <Stat v={plan.goal.verdict} l="the goal, on what you have" color={vColor} />
             <Stat v={plan.predicted.seconds ? secsToClock(plan.predicted.seconds) : null} l="equivalent today" color={HEX.rhr}
                   sub={plan.predicted.basis === "prior race" ? "from your previous marathon" : "from your best long run"} />
-            <Stat v={plannedSoFar ? `${Math.round((doneMiles / plannedSoFar) * 100)}%` : null} l="of the plan run so far" color={HEX.run}
+            <Stat v={plannedSoFar ? `${Math.round((doneMiles / plannedSoFar) * 100)}%` : null} l="of the plan run so far"
+                  color={!plannedSoFar ? HEX.rest : doneMiles / plannedSoFar >= 0.9 ? HEX.run : doneMiles / plannedSoFar >= 0.7 ? HEX.lift : HEX.alert}
                   sub={plannedSoFar ? `${round(doneMiles, 0)} of ${round(plannedSoFar, 0)} ${u}` : "nothing due yet"} />
             <Stat v={round(sum(plan.weeks.map((w) => w.plannedMiles)), 0)} l={`${u} to race day`} color={HEX.lift}
                   sub={`peak week ${Math.max(...plan.weeks.map((w) => w.plannedMiles))} ${u}`} />
           </div>
+          {(() => {
+            const done = plan.weeks.filter((w) => w.status === "done");
+            if (!done.length) return null;
+            const pct = plannedSoFar ? (doneMiles / plannedSoFar) * 100 : 0;
+            const longestDone = Math.max(0, ...done.map((w) => w.longestDone || 0));
+            const bigDone = done.filter((w) => (w.longestDone || 0) >= plan.type.peakLong * 0.95).length;
+            const word = pct >= 95 ? "on plan" : pct >= 80 ? "a little behind" : pct >= 60 ? "well behind" : "off the plan";
+            return (
+              <p className="note" style={{ marginBottom: 10 }}>
+                <b>Tracking: {word}.</b> {done.length} week{done.length === 1 ? "" : "s"} done at {Math.round(pct)}% of planned {u}.
+                Longest completed {longestDone} {u}{plan.type.bigTarget ? `, ${bigDone} of ${plan.type.bigTarget} at ${plan.type.peakLong}` : ""}.
+                {pct < 80 ? " The weeks ahead rebuild from what you actually ran, so the ladder has already eased." : ""}
+              </p>
+            );
+          })()}
           {plan.goal.notes.length > 0 && (
             <div className="note" style={{ paddingLeft: 10, borderLeft: `3px solid ${vColor}` }}>
               {plan.goal.notes.map((n, i) => <div key={i} style={{ marginBottom: 3 }}>{n}</div>)}
@@ -2750,8 +2781,8 @@ function Calendar({ daily, settings, setSettings }) {
         <h2>Paces <span className="hint">from your goal time</span></h2>
         <div className="body">
           <div className="grid4" style={{ gap: 12 }}>
-            {[["marathon", "race pace"], ["long", "long runs"], ["easy", "easy days"], ["steady", "medium-long"], ["tempo", "tempo"], ["interval", "intervals"]].map(([k, l]) => (
-              <Stat key={k} v={secsToClock(plan.paces[k])} l={`${l} / ${u}`} color={k === "marathon" ? HEX.alert : HEX.run} />
+            {[["race", "race pace"], ["long", "long runs"], ["easy", "easy days"], ["steady", "medium-long"], ["tempo", "tempo"], ["interval", "intervals"]].map(([k, l]) => (
+              <Stat key={k} v={secsToClock(plan.paces[k])} l={`${l} / ${u}`} color={k === "race" ? HEX.alert : HEX.run} />
             ))}
           </div>
         </div>
@@ -3537,6 +3568,7 @@ function withDefaults(st) {
   const s = { ...DEFAULT_SETTINGS, ...(st || {}), race: { ...DEFAULT_SETTINGS.race, ...((st && st.race) || {}) } };
   if (!Array.isArray(s.dayTags)) s.dayTags = DEFAULT_SETTINGS.dayTags;
   if (!PALETTES[s.theme]) s.theme = "light";
+  if (!RACE_TYPES[s.race.kind]) s.race.kind = "marathon";
   s.priorRace = { distanceMi: 26.2, time: "", date: "", ...(s.priorRace || {}) };
   if (s.planStart === undefined) s.planStart = null;
   s.planPrefs = { ...DEFAULT_PREFS, ...(s.planPrefs || {}) };

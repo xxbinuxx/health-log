@@ -3,6 +3,8 @@ import Papa from "papaparse";
 import { store } from "./storage";
 import { supabase } from "./supabase";
 import { parseNotes } from "./notesImport";
+import { parseRocketMoney, resolveBuckets, spendByDay, SPEND_BUCKETS, DEFAULT_SPEND_SETTINGS } from "./spendImport";
+import { buildPlan, DEFAULT_PREFS } from "./plan";
 import {
   pad, KM_PER_MI, toUnit, fromUnit, round, clamp, avg, sum,
   toDayKey, fromDayKey, addDays, mondayOf, dayKeyFor, lastNDays,
@@ -20,7 +22,7 @@ import {
 
 const KEYS = {
   doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions",
-  lifts: "hl2:lifts", days: "hl2:days", settings: "hl2:settings",
+  lifts: "hl2:lifts", days: "hl2:days", spend: "hl2:spend", settings: "hl2:settings",
 };
 
 /* ================================================================== */
@@ -38,12 +40,17 @@ const DEFAULT_SETTINGS = {
   sleepHoursGoal: 7.5,
   stepsGoal: 8000,
   theme: "light",
+  peerSocialMax: 150,
+  planStart: null,
+  priorRace: { time: "", distanceMi: 26.2, date: "" },
+  planPrefs: { ...DEFAULT_PREFS },
+  currency: "$",
   dayTags: ["normal", "social", "date", "travel", "work late", "sick", "family"],
   race: { name: "", date: "", goalTime: "" },
   presets: [
     { id: "c1", kind: "caffeine", label: "Americano", amount: 128, unit: "mg" },
     { id: "c2", kind: "caffeine", label: "Espresso", amount: 64, unit: "mg" },
-    { id: "c3", kind: "caffeine", label: "Cold brew", amount: 200, unit: "mg" },
+    { id: "c3", kind: "caffeine", label: "Ultra", amount: 40, unit: "mg" },
     { id: "c4", kind: "caffeine", label: "Matcha", amount: 70, unit: "mg" },
     { id: "a1", kind: "alcohol", label: "Beer", amount: 1, unit: "drinks" },
     { id: "a2", kind: "alcohol", label: "Wine", amount: 1, unit: "drinks" },
@@ -489,6 +496,19 @@ const CSS = `
 .hl .saved{font-size:11.5px;color:var(--lift);}
 .hl .tag.stim{background:var(--stim);}
 .hl .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--rule-soft);color:var(--soft);}
+.hl table.cal{table-layout:fixed;}
+.hl table.cal th{text-align:center;font-size:10.5px;}
+.hl .cell{border:1px solid var(--rule-soft);padding:4px 3px;vertical-align:top;cursor:pointer;height:58px;}
+.hl .cell:hover{border-color:var(--rule);}
+.hl .cell.today{outline:2px solid var(--navy);outline-offset:-2px;}
+.hl .cell.empty-cell{background:var(--paper);cursor:default;}
+.hl .cell .dnum{font-size:10px;color:var(--faint);}
+.hl .cell .dtitle{font-size:12px;font-weight:600;letter-spacing:-0.01em;}
+.hl .cell .dsub{font-size:10px;color:var(--soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hl .cell .dmark{font-size:10px;margin-top:1px;}
+.hl .cell .dmark.done{color:var(--run);} .hl .cell .dmark.short{color:var(--lift);}
+.hl .cell .dmark.missed{color:var(--alert);} .hl .cell .dmark.extra{color:var(--sleep);}
+@media(max-width:700px){.hl .cell{height:52px;padding:3px 2px;} .hl .cell .dsub{display:none;}}
 .hl .scorerow{display:grid;grid-template-columns:minmax(160px,210px) 1fr;gap:18px;align-items:start;}
 @media(max-width:700px){.hl .scorerow{grid-template-columns:1fr;}}
 .hl .rangebar{display:flex;justify-content:flex-end;margin:-6px 0 14px;}
@@ -2298,6 +2318,448 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
   );
 }
 
+function CalendarWrap({ doses, sleep, sessions, days, settings, setSettings }) {
+  const daily = useDaily({ doses, sleep, sessions, days, settings });
+  return <Calendar daily={daily} settings={settings} setSettings={setSettings} />;
+}
+
+function SpendDashWrap({ doses, sleep, sessions, days, spend, setSpend, settings, setSettings, range }) {
+  const daily = useDaily({ doses, sleep, sessions, days, settings });
+  return <SpendDash spend={spend} setSpend={setSpend} daily={daily} settings={settings} setSettings={setSettings} range={range} doses={doses} />;
+}
+
+/* Spend, joined to the rest of the log. "Going out" is the only bucket that correlates
+   with anything here, so it leads. */
+function SpendDash({ spend, setSpend, daily, settings, setSettings, range, doses }) {
+  const today = toDayKey(new Date());
+  const u = settings.currency || "$";
+  const max = settings.peerSocialMax ?? DEFAULT_SPEND_SETTINGS.peerSocialMax;
+  const span = lastNDays(range, today);
+  const spanSet = new Set(span);
+
+  const resolved = useMemo(() => resolveBuckets(spend || [], daily.get, { peerSocialMax: max }), [spend, daily, max]);
+  const byDay = useMemo(() => spendByDay(resolved), [resolved]);
+  const inRange = resolved.filter((t) => spanSet.has(t.date));
+
+  const money = (n) => `${u}${Math.round(n).toLocaleString()}`;
+  const tot = (b) => sum(inRange.filter((t) => t.bucket === b && t.amount > 0).map((t) => t.amount));
+  const paidBack = sum(span.map((k) => byDay.get(k)?.peerIn || 0));
+  const outGross = tot("out");
+  const daysOut = span.filter((k) => (byDay.get(k)?.out || 0) > 0).length;
+  const weeks = Math.max(1, range / 7);
+
+  const buckets = bucketize(span, range);
+  const noun = bucketNoun(range);
+  const chart = buckets.map((b) => ({
+    label: b.label,
+    out: round(bucketSum(b, (k) => byDay.get(k)?.out), 0) || 0,
+    home: round(bucketSum(b, (k) => byDay.get(k)?.home), 0) || 0,
+    other: round(bucketSum(b, (k) => byDay.get(k)?.other), 0) || 0,
+  }));
+
+  // going out against Degen, the whole point of joining the two
+  const idx = useMemo(() => new Map(buildIndices(daily, span, settings).map((r) => [r.date, r])), [daily, span, settings]);
+  const scatter = span.map((k) => ({ date: k, spend: byDay.get(k)?.out || 0, degen: idx.get(k)?.degen ?? null }))
+    .filter((p) => p.spend > 0 && p.degen != null);
+  const r = scatter.length >= 4 ? pearson(scatter.map((p) => p.degen), scatter.map((p) => p.spend)) : null;
+
+  const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const weekday = DOW.map((name, i) => {
+    const dow = (i + 1) % 7;
+    const days = span.filter((k) => fromDayKey(k).getDay() === dow);
+    return { day: name, spend: round(sum(days.map((k) => byDay.get(k)?.out || 0)), 0) };
+  });
+
+  const big = [...byDay.values()].filter((x) => spanSet.has(x.date) && x.out > 0)
+    .sort((a, b) => b.out - a.out).slice(0, 8);
+
+  const last = spend?.length ? [...spend].map((t) => t.date).sort().pop() : null;
+  const stale = last ? Math.floor((fromDayKey(today) - fromDayKey(last)) / 864e5) : null;
+
+  return (
+    <>
+      <SpendImport spend={spend} setSpend={setSpend} settings={settings} />
+
+      {!spend?.length ? null : (
+        <>
+          <div className="panel">
+            <h2>Spend <span className="hint">last {range} days{stale != null ? ` · data runs to ${fmtShort(last)}` : ""}</span></h2>
+            <div className="body">
+              <div className="grid4" style={{ gap: 12 }}>
+                <Stat v={money(outGross)} l="going out" color={kindHex("alcohol")}
+                      sub={`${money(outGross / weeks)} a week · ${daysOut} days out`} />
+                <Stat v={money(outGross - paidBack)} l="net of what came back" color={kindHex("alcohol")}
+                      sub={paidBack ? `${money(paidBack)} returned by friends` : "nothing returned"} />
+                <Stat v={daysOut ? money(outGross / daysOut) : null} l="per day out" color={kindHex("alcohol")} />
+                <Stat v={money(tot("home"))} l="at home" color={kindHex("cannabis")}
+                      sub={`subscriptions, gaming, betting`} />
+                <Stat v={money(tot("other"))} l="everything else" color={HEX.rest} />
+                <Stat v={money(tot("peer"))} l="peer payments out" color={HEX.rhr}
+                      sub={`under ${u}${max} on a drinking day counts as going out`} />
+              </div>
+              {stale != null && stale > 30 && (
+                <p className="note flag" style={{ marginTop: 10 }}>
+                  Your spend data is {stale} days old. Pull a fresh Rocket Money export.
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="panel">
+            <h2>Where it goes <span className="hint">per {noun}</span></h2>
+            <div className="body" style={{ paddingTop: 8 }}>
+              <Chart h={220}>
+                <BarChart data={chart} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+                  <CartesianGrid stroke={HEX.grid} vertical={false} />
+                  <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chart.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                  <YAxis tick={axisTick()} tickLine={false} axisLine={false} tickFormatter={(v) => `${u}${v >= 1000 ? `${Math.round(v / 100) / 10}k` : v}`} />
+                  <Tooltip content={<Tip fmt={(p) => money(p.value)} />} />
+                  <Bar dataKey="out" name="Going out" stackId="a" fill={kindHex("alcohol")} />
+                  <Bar dataKey="home" name="At home" stackId="a" fill={kindHex("cannabis")} />
+                  <Bar dataKey="other" name="Everything else" stackId="a" fill={HEX.rest} radius={[2, 2, 0, 0]} />
+                </BarChart>
+              </Chart>
+              <div className="legend">
+                {Object.entries(SPEND_BUCKETS).filter(([k]) => k !== "peer").map(([k, m]) => (
+                  <span key={k}><i style={{ background: k === "out" ? kindHex("alcohol") : k === "home" ? kindHex("cannabis") : HEX.rest }} />{m.name}: {m.hint}</span>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid2">
+            <div className="panel">
+              <h2>Going out by weekday</h2>
+              <div className="body" style={{ paddingTop: 8 }}>
+                <Chart h={180}>
+                  <BarChart data={weekday} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+                    <CartesianGrid stroke={HEX.grid} vertical={false} />
+                    <XAxis dataKey="day" tick={axisTick()} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                    <YAxis tick={axisTick()} tickLine={false} axisLine={false} tickFormatter={(v) => `${u}${v >= 1000 ? `${Math.round(v / 100) / 10}k` : v}`} />
+                    <Tooltip content={<Tip fmt={(p) => money(p.value)} />} />
+                    <Bar dataKey="spend" name="Going out" radius={[2, 2, 0, 0]}>
+                      {weekday.map((d, i) => <Cell key={i} fill={d.day === "Fri" || d.day === "Sat" ? HEX.alert : kindHex("alcohol")} />)}
+                    </Bar>
+                  </BarChart>
+                </Chart>
+              </div>
+            </div>
+            <div className="panel">
+              <h2>Spend against Degen <span className="hint">each dot is a day you went out</span></h2>
+              <div className="body" style={{ paddingTop: 8 }}>
+                {scatter.length < 4 ? <p className="empty">Not enough overlapping days yet.</p> : (
+                  <>
+                    <Chart h={180}>
+                      <ScatterChart margin={{ top: 8, right: 10, left: -8, bottom: 2 }}>
+                        <CartesianGrid stroke={HEX.grid} />
+                        <XAxis type="number" dataKey="degen" name="Degen" domain={[0, 100]} tick={axisTick()} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                        <YAxis type="number" dataKey="spend" name="Spend" tick={axisTick()} tickLine={false} axisLine={false} tickFormatter={(v) => `${u}${v}`} />
+                        <Tooltip content={({ active, payload }) => {
+                          if (!active || !payload?.length) return null;
+                          const d = payload[0].payload;
+                          return <div className="rc-tip"><b>{fmtDayLabel(d.date)}</b><div>{money(d.spend)} · Degen {Math.round(d.degen)}</div></div>;
+                        }} />
+                        <Scatter data={scatter} fill={kindHex("alcohol")} fillOpacity={0.6} />
+                      </ScatterChart>
+                    </Chart>
+                    <p className="note" style={{ marginTop: 6 }}>
+                      {r == null ? "" : Math.abs(r) < 0.2 ? "Spend and intake barely track each other — the expensive nights are not always the heavy ones."
+                        : r > 0 ? `Heavier nights do cost more (r = ${round(r, 2)}).`
+                        : `Oddly, heavier nights cost less (r = ${round(r, 2)}).`}
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="panel">
+            <h2>The expensive ones</h2>
+            <div className="body">
+              <table>
+                <thead><tr><th>Day</th><th className="num">Out</th><th className="num">Back</th><th>What you logged</th></tr></thead>
+                <tbody>
+                  {big.map((x) => {
+                    const d = daily.get(x.date);
+                    return (
+                      <tr key={x.date}>
+                        <td style={{ whiteSpace: "nowrap" }}>{fmtDayLabel(x.date)}</td>
+                        <td className="num">{money(x.out)}</td>
+                        <td className="num" style={{ color: "var(--faint)" }}>{x.peerIn ? money(x.peerIn) : ""}</td>
+                        <td style={{ color: "var(--soft)" }}>
+                          {[d.alc ? `${round(d.alc, 1)} drinks` : null, d.thcMg ? `${round(d.thcMg, 1)} mg THC` : null,
+                            d.sleep?.score != null ? `slept ${d.sleep.score}` : null, d.note || null].filter(Boolean).join(" · ") || "nothing logged"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+/* Paste or drop a Rocket Money export. Re-importing is safe: rows are keyed and merge. */
+function SpendImport({ spend, setSpend, settings }) {
+  const [text, setText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [done, setDone] = useState(null);
+  const fileRef = useRef(null);
+
+  const read = (csv) => {
+    setDone(null);
+    const parsed = Papa.parse(csv.trim(), { header: true, skipEmptyLines: true });
+    if (!parsed.data?.length) { setPreview({ empty: true }); return; }
+    const res = parseRocketMoney(parsed.data);
+    if (!res.txns.length) { setPreview({ empty: true }); return; }
+    const have = new Set((spend || []).map((t) => t.id));
+    const fresh = res.txns.filter((t) => !have.has(t.id));
+    setPreview({ ...res, fresh, already: res.txns.length - fresh.length });
+  };
+
+  const onFile = (ev) => {
+    const f = ev.target.files?.[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => read(String(r.result));
+    r.readAsText(f); ev.target.value = "";
+  };
+
+  const bring = () => {
+    setSpend(mergeBy(spend || [], preview.fresh, (t) => t.id));
+    setDone(preview.fresh.length);
+    setPreview(null); setText("");
+  };
+
+  return (
+    <div className="panel">
+      <h2>Import from Rocket Money <span className="hint">export everything; already-imported rows are skipped</span></h2>
+      <div className="body">
+        <div className="row" style={{ marginBottom: 10 }}>
+          <a className="ghost" href="https://app.rocketmoney.com/transactions" target="_blank" rel="noreferrer"
+             style={{ textDecoration: "none", padding: "6px 12px", display: "inline-block" }}>
+            Open Rocket Money transactions
+          </a>
+          <button className="ghost" onClick={() => fileRef.current?.click()}>Choose the CSV</button>
+          <input ref={fileRef} type="file" accept=".csv,text/csv" onChange={onFile} style={{ display: "none" }} />
+          {done != null && <span className="note ok">Added {done} transaction{done === 1 ? "" : "s"}.</span>}
+        </div>
+        <p className="note" style={{ marginBottom: 10 }}>
+          On that page: <b>Export</b>, no filters, then open the emailed link. Drop the file here. Export the full history every
+          time — nothing duplicates, so there is no reason to narrow the dates.
+        </p>
+        <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="…or paste the CSV contents here" />
+        <div style={{ marginTop: 9 }}>
+          <button className="solid" onClick={() => text.trim() && read(text)} disabled={!text.trim()}>Read it</button>
+        </div>
+
+        {preview?.empty && <p className="note flag" style={{ marginTop: 10 }}>Nothing read. That does not look like a Rocket Money export.</p>}
+        {preview && !preview.empty && (
+          <>
+            <div className="divline" />
+            <p className="note" style={{ marginBottom: 8 }}>
+              <b>{preview.fresh.length} new</b> of {preview.txns.length}, {preview.span[0]} to {preview.span[1]}.
+              {preview.already ? ` ${preview.already} already in.` : ""}
+              {preview.skipped ? ` ${preview.skipped} skipped as transfers, payments or investments.` : ""}
+            </p>
+            <div className="chips" style={{ marginBottom: 10 }}>
+              {Object.entries(SPEND_BUCKETS).map(([k, m]) => {
+                const n = preview.fresh.filter((t) => t.bucket === k || (k === "out" && t.bucket === "ride")).length;
+                return n ? <span key={k} className="chip" style={{ cursor: "default" }}>{m.name}<span className="amt">{n}</span></span> : null;
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="solid" onClick={bring} disabled={!preview.fresh.length}>Import {preview.fresh.length}</button>
+              <button className="ghost" onClick={() => setPreview(null)}>Cancel</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* The training calendar. Rebuilt from the log every render, so what you actually did
+   changes what comes next. Nothing here is generated by a model — it is all arithmetic,
+   shaped like Higdon's Intermediate 2 and the BAA's level-four template. */
+function Calendar({ daily, settings, setSettings }) {
+  const today = toDayKey(new Date());
+  const race = settings.race || {};
+  const goalSec = parseGoalTime(race.goalTime);
+  const ready = race.date && goalSec && race.date >= today;
+  const [pick, setPick] = useState(null);
+
+  const plan = useMemo(() => {
+    if (!ready) return null;
+    try { return buildPlan({ todayKey: today, startKey: settings.planStart, raceDate: race.date, raceName: race.name, goalSeconds: goalSec, daily, settings }); }
+    catch (e) { console.error("plan:", e); return null; }
+  }, [ready, race.date, race.name, goalSec, daily, settings, today]);
+
+  // anchor the plan the first time it is viewed, so the calendar keeps its history
+  useEffect(() => {
+    if (ready && !settings.planStart) setSettings({ ...settings, planStart: mondayOf(today) });
+  }, [ready, settings.planStart]);
+
+  const setRace = (patch) => setSettings({ ...settings, race: { ...settings.race, ...patch } });
+  const setPrior = (patch) => setSettings({ ...settings, priorRace: { distanceMi: 26.2, ...(settings.priorRace || {}), ...patch } });
+  const setPrefs = (patch) => setSettings({ ...settings, planPrefs: { ...DEFAULT_PREFS, ...(settings.planPrefs || {}), ...patch } });
+  const prefs = { ...DEFAULT_PREFS, ...(settings.planPrefs || {}) };
+
+  const Setup = (
+    <div className="panel">
+      <h2>The race <span className="hint">everything below is built from these</span></h2>
+      <div className="body">
+        <div className="row">
+          <label className="f" style={{ flex: 1, minWidth: 130 }}>Race<input value={race.name || ""} placeholder="CIM" onChange={(e) => setRace({ name: e.target.value })} /></label>
+          <label className="f" style={{ width: 150 }}>Date<input type="date" value={race.date || ""} onChange={(e) => setRace({ date: e.target.value })} /></label>
+          <label className="f" style={{ width: 112 }}>Goal<input value={race.goalTime || ""} placeholder="3:15:00" onChange={(e) => setRace({ goalTime: e.target.value })} /></label>
+        </div>
+        <div className="row" style={{ marginTop: 10 }}>
+          <label className="f" style={{ width: 128 }}>Previous best<input value={settings.priorRace?.time || ""} placeholder="3:20:00" onChange={(e) => setPrior({ time: e.target.value })} /></label>
+          <label className="f" style={{ width: 150 }}>When<input type="date" value={settings.priorRace?.date || ""} onChange={(e) => setPrior({ date: e.target.value })} /></label>
+          <label className="f" style={{ width: 128 }}>Long run day
+            <select value={prefs.longRunDays[0]} onChange={(e) => {
+              const d = Number(e.target.value);
+              setPrefs({ longRunDays: [d, ...[0, 6, 5].filter((x) => x !== d)] });
+            }}>
+              <option value={0}>Sunday</option><option value={6}>Saturday</option><option value={5}>Friday</option>
+            </select>
+          </label>
+          <label className="f" style={{ width: 118 }}>Twenties wanted
+            <input value={prefs.twentyTarget} inputMode="numeric" onChange={(e) => setPrefs({ twentyTarget: Math.max(0, Math.min(4, Number(e.target.value) || 0)) })} />
+          </label>
+          <label className="f" style={{ width: 148 }}>Plan started
+            <input type="date" value={settings.planStart || ""} onChange={(e) => setSettings({ ...settings, planStart: e.target.value || null })} />
+          </label>
+        </div>
+        <p className="note" style={{ marginTop: 8 }}>
+          Intervals stay on Tuesday. A previous marathon time predicts far better than training runs do, so fill it in if you have one.
+        </p>
+      </div>
+    </div>
+  );
+
+  if (!ready || !plan) {
+    return <>{Setup}<div className="panel"><div className="body"><p className="empty">
+      {race.date && race.date < today ? "That race date has passed." : "Add a date in the future and a goal time, and the calendar appears."}
+    </p></div></div></>;
+  }
+
+  const u = plan.unit;
+  const vColor = { comfortable: HEX.run, realistic: HEX.run, "a stretch": HEX.lift }[plan.goal.verdict] || HEX.alert;
+  const kindColor = (k) => (k === "race" ? HEX.alert : k === "lift" ? HEX.lift : k === "rest" ? HEX.rest : HEX.run);
+  const vMark = { done: "✓", short: "~", missed: "×", extra: "+", "ran instead": "~", "as planned": "" };
+
+  const doneMiles = sum(plan.weeks.map((w) => w.doneMiles || 0));
+  const plannedSoFar = sum(plan.weeks.map((w) => w.plannedSoFar || 0));
+
+  return (
+    <>
+      {Setup}
+
+      <div className="panel">
+        <h2>{plan.raceName || "Race"} in {Math.max(0, Math.round((fromDayKey(plan.raceDate) - fromDayKey(today)) / 864e5))} days
+          <span className="hint">{plan.weeks.length} weeks · {plan.twenties} × 20 {u} · goal pace {secsToClock(plan.paces.marathon)}/{u}</span>
+        </h2>
+        <div className="body">
+          <div className="grid4" style={{ gap: 12, marginBottom: 12 }}>
+            <Stat v={plan.goal.verdict} l="the goal, on what you have" color={vColor} />
+            <Stat v={plan.predicted.seconds ? secsToClock(plan.predicted.seconds) : null} l="equivalent today" color={HEX.rhr}
+                  sub={plan.predicted.basis === "prior race" ? "from your previous marathon" : "from your best long run"} />
+            <Stat v={plannedSoFar ? `${Math.round((doneMiles / plannedSoFar) * 100)}%` : null} l="of the plan run so far" color={HEX.run}
+                  sub={plannedSoFar ? `${round(doneMiles, 0)} of ${round(plannedSoFar, 0)} ${u}` : "nothing due yet"} />
+            <Stat v={round(sum(plan.weeks.map((w) => w.plannedMiles)), 0)} l={`${u} to race day`} color={HEX.lift}
+                  sub={`peak week ${Math.max(...plan.weeks.map((w) => w.plannedMiles))} ${u}`} />
+          </div>
+          {plan.goal.notes.length > 0 && (
+            <div className="note" style={{ paddingLeft: 10, borderLeft: `3px solid ${vColor}` }}>
+              {plan.goal.notes.map((n, i) => <div key={i} style={{ marginBottom: 3 }}>{n}</div>)}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="panel">
+        <h2>Calendar <span className="hint">ticks are what you did; the plan ahead adapts to it</span></h2>
+        <div className="body" style={{ overflowX: "auto" }}>
+          <table className="cal">
+            <thead><tr><th style={{ width: 54 }}></th>{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => <th key={d}>{d}</th>)}<th className="num" style={{ width: 58 }}>{u}</th></tr></thead>
+            <tbody>
+              {plan.weeks.map((w) => {
+                const byDow = {};
+                for (const d of w.days) byDow[fromDayKey(d.date).getDay()] = d;
+                return (
+                  <tr key={w.week}>
+                    <td style={{ color: "var(--faint)", fontSize: 11 }}>
+                      wk{w.week}<br /><span style={{ color: kindColor("run"), fontSize: 10 }}>{w.phase}</span>
+                    </td>
+                    {[1, 2, 3, 4, 5, 6, 0].map((dow) => {
+                      const d = byDow[dow];
+                      if (!d) return <td key={dow} className="cell empty-cell" />;
+                      const m = w.marks?.[d.date];
+                      const isToday = d.date === today;
+                      return (
+                        <td key={dow} className={`cell${isToday ? " today" : ""}`} onClick={() => setPick(d)}>
+                          <div className="dnum">{fromDayKey(d.date).getDate()}</div>
+                          <div className="dtitle" style={{ color: kindColor(d.kind) }}>
+                            {d.kind === "rest" ? "rest" : d.miles ? `${d.miles} ${u}` : "lift"}
+                          </div>
+                          <div className="dsub">{d.kind === "rest" ? "" : d.title.replace(" run", "").replace("Marathon-pace", "MP")}</div>
+                          {m && <div className={`dmark ${m.verdict.replace(/\s/g, "-")}`}>{vMark[m.verdict] ?? ""} {m.actualMiles > 0 ? `${m.actualMiles}` : ""}</div>}
+                        </td>
+                      );
+                    })}
+                    <td className="num" style={{ fontSize: 12 }}>
+                      {w.plannedMiles}
+                      {w.doneMiles != null && <div style={{ color: "var(--faint)", fontSize: 11 }}>{w.doneMiles} done</div>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="legend">
+            <span><i style={{ background: HEX.run }} />run</span>
+            <span><i style={{ background: HEX.lift }} />lift</span>
+            <span><i style={{ background: HEX.rest }} />rest</span>
+            <span><i style={{ background: HEX.alert }} />race</span>
+            <span>✓ done · ~ short · × missed · + extra</span>
+          </div>
+        </div>
+      </div>
+
+      {pick && (
+        <div className="panel">
+          <h2>{pick.dow} {fmtDayLabel(pick.date)} <button className="del" onClick={() => setPick(null)} style={{ fontSize: 13 }}>close</button></h2>
+          <div className="body">
+            <div className="row" style={{ marginBottom: 8 }}>
+              <span className={`tag ${pick.kind === "race" ? "run" : pick.kind}`}>{pick.kind}</span>
+              <b style={{ fontSize: 15 }}>{pick.title}</b>
+              {pick.miles ? <span className="note">{pick.miles} {u}{pick.pace ? ` at ${secsToClock(pick.pace)}/${u}` : ""}</span> : null}
+            </div>
+            {pick.note && <p className="note" style={{ color: "var(--ink)" }}>{pick.note}</p>}
+            {pick.flexible && <p className="note" style={{ marginTop: 6 }}>Long runs can move to Friday or Saturday if the weekend demands it — the plan only cares that it happens.</p>}
+          </div>
+        </div>
+      )}
+
+      <div className="panel">
+        <h2>Paces <span className="hint">from your goal time</span></h2>
+        <div className="body">
+          <div className="grid4" style={{ gap: 12 }}>
+            {[["marathon", "race pace"], ["long", "long runs"], ["easy", "easy days"], ["steady", "medium-long"], ["tempo", "tempo"], ["interval", "intervals"]].map(([k, l]) => (
+              <Stat key={k} v={secsToClock(plan.paces[k])} l={`${l} / ${u}`} color={k === "marathon" ? HEX.alert : HEX.run} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 /* The numbers worth chasing, over the whole log rather than the selected range. */
 function Bests({ daily, sessions, doses, settings }) {
   const u = settings.distanceUnit;
@@ -2548,7 +3010,7 @@ function IntakeDash({ doses, sleep, sessions, days, settings, range }) {
 /* Data                                                               */
 /* ================================================================== */
 
-function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, settings, setSettings, resetAll, storageOk }) {
+function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setSpend, settings, setSettings, resetAll, storageOk }) {
   const [source, setSource] = useState("garmin");
   const [text, setText] = useState("");
   const [msg, setMsg] = useState(null);
@@ -2608,6 +3070,7 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
         if (d.sessions) setSessions(d.sessions);
         if (d.lifts) setLifts(d.lifts);
         if (d.days) setDays(d.days);
+        if (d.spend) setSpend(d.spend);
         if (d.settings) setSettings(withDefaults(d.settings));
         setMsg({ text: "Backup restored." });
       } catch { setMsg({ bad: true, text: "That file is not a valid backup." }); }
@@ -2624,12 +3087,13 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
   const exportCsv = () => {
     // one row per day: the same shape as the Log tab
     const keys = new Set([...state.sleep.map((s) => s.date), ...state.sessions.map((s) => s.date), ...state.days.map((d) => d.date),
-      ...state.doses.map((d) => dayKeyFor(d.ts, settings.dayStartHour))]);
+      ...state.doses.map((d) => dayKeyFor(d.ts, settings.dayStartHour)), ...(state.spend || []).map((t) => t.date)]);
     const rows = [...keys].sort().map((k) => {
       const sl = state.sleep.find((s) => s.date === k);
       const ses = state.sessions.filter((s) => s.date === k);
       const ds = state.doses.filter((d) => dayKeyFor(d.ts, settings.dayStartHour) === k);
       const dy = state.days.find((d) => d.date === k);
+      const sp = (state.spend || []).filter((t) => t.date === k && t.amount > 0);
       const kindSum = (kind) => ds.filter((d) => d.kind === kind).reduce((a, b) => a + b.amount, 0);
       const runPaces = ses.filter((s) => s.kind === "run").map((s) => paceSecOf(s, settings.distanceUnit)).filter(Boolean);
       return {
@@ -2637,6 +3101,8 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
         body_battery: sl?.bodyBattery ?? "", bedtime: sl?.bedtime ?? "",
         vo2_max: sl?.vo2 ?? "", fitness_age: sl?.fitnessAge ?? "",
         day_tags: (dy?.tags || []).join(" | "), day_note: dy?.note ?? "", steps: dy?.steps ?? "",
+        spend_out: round(sum(sp.filter((t) => t.bucket === "out").map((t) => t.amount)), 2) || "",
+        spend_total: round(sum(sp.map((t) => t.amount)), 2) || "",
         workouts: ses.map((s) => `${s.kind}:${s.type || ""}`).join(" | "),
         run_distance: round(toUnit(sum(ses.filter((s) => s.kind === "run").map((s) => s.distanceKm || 0)), settings.distanceUnit), 2) || "",
         run_pace: runPaces.length ? secsToClock(avg(runPaces)) : "",
@@ -2697,7 +3163,7 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
             Column names are matched loosely, so exports from different app versions still land.
             Re-importing the same file updates rows rather than duplicating them.
             On file: {state.sleep.length} nights, {state.sessions.length} sessions, {state.lifts.length} sets,
-            {" "}{state.doses.length} intake entries, {state.days.length} day notes.
+            {" "}{state.doses.length} intake entries, {state.days.length} day notes, {(state.spend || []).length} transactions.
           </p>
         </div>
       </div>
@@ -2735,6 +3201,10 @@ function Data({ state, setSleep, setSessions, setLifts, setDoses, setDays, setti
             <label className="f" style={{ width: 136 }}>Drinks per week limit
               <input value={settings.drinksWeeklyLimit} inputMode="numeric"
                      onChange={(e) => setSettings({ ...settings, drinksWeeklyLimit: Number(e.target.value) || 7 })} />
+            </label>
+            <label className="f" style={{ width: 176 }}>Peer payment counts as going out under
+              <input value={settings.peerSocialMax ?? 150} inputMode="numeric"
+                     onChange={(e) => setSettings({ ...settings, peerSocialMax: Number(e.target.value) || 150 })} />
             </label>
             <label className="f" style={{ width: 118 }}>Steps goal
               <input value={settings.stepsGoal} inputMode="numeric"
@@ -3067,6 +3537,10 @@ function withDefaults(st) {
   const s = { ...DEFAULT_SETTINGS, ...(st || {}), race: { ...DEFAULT_SETTINGS.race, ...((st && st.race) || {}) } };
   if (!Array.isArray(s.dayTags)) s.dayTags = DEFAULT_SETTINGS.dayTags;
   if (!PALETTES[s.theme]) s.theme = "light";
+  s.priorRace = { distanceMi: 26.2, time: "", date: "", ...(s.priorRace || {}) };
+  if (s.planStart === undefined) s.planStart = null;
+  s.planPrefs = { ...DEFAULT_PREFS, ...(s.planPrefs || {}) };
+  if (!Array.isArray(s.planPrefs.longRunDays) || !s.planPrefs.longRunDays.length) s.planPrefs.longRunDays = DEFAULT_PREFS.longRunDays;
   if (!Array.isArray(s.presets) || !s.presets.length) s.presets = DEFAULT_SETTINGS.presets;
   else {
     // bring saved chips in line with the current defaults without touching ones you added yourself
@@ -3078,6 +3552,7 @@ function withDefaults(st) {
       s.presets = [...s.presets, ...DEFAULT_SETTINGS.presets.filter((p) => p.kind === "stimulant")];
     }
     s.presets = s.presets.map((p) => (p.id === "c1" ? { ...p, label: "Americano", amount: 128 }
+      : p.id === "c3" ? { ...p, label: "Ultra", amount: p.label === "Cold brew" ? 40 : p.amount }
       : p.id === "c4" ? { ...p, label: "Matcha", amount: 70 } : p));
     for (const id of ["a5", "w7"]) {
       if (!s.presets.some((p) => p.id === id)) {
@@ -3100,15 +3575,17 @@ export default function HealthLog({ email, onSignOut }) {
   const [manualSessions, setManualSessions] = useState([]);
   const [lifts, setLifts] = useState([]);
   const [days, setDays] = useState([]);
+  const [spend, setSpend] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
   useEffect(() => {
     (async () => {
-      const [d, s, se, l, st, dy] = await Promise.all([
+      const [d, s, se, l, st, dy, sp] = await Promise.all([
         store.get(KEYS.doses), store.get(KEYS.sleep), store.get(KEYS.sessions),
-        store.get(KEYS.lifts), store.get(KEYS.settings), store.get(KEYS.days),
+        store.get(KEYS.lifts), store.get(KEYS.settings), store.get(KEYS.days), store.get(KEYS.spend),
       ]);
       if (dy) setDays(dy);
+      if (sp) setSpend(sp);
       if (d) setDoses(d);
       if (s) setSleep(s);
       if (se) setManualSessions(se);
@@ -3135,6 +3612,7 @@ export default function HealthLog({ email, onSignOut }) {
   useEffect(() => { save(KEYS.sessions, manualSessions); }, [manualSessions, save]);
   useEffect(() => { save(KEYS.lifts, lifts); }, [lifts, save]);
   useEffect(() => { save(KEYS.days, days); }, [days, save]);
+  useEffect(() => { save(KEYS.spend, spend); }, [spend, save]);
   useEffect(() => { save(KEYS.settings, settings); }, [settings, save]);
 
   // Strong sets become lift sessions unless a hand-logged lift already covers that day.
@@ -3158,13 +3636,13 @@ export default function HealthLog({ email, onSignOut }) {
   const upsertDay = (rec) => setDays((x) => mergeBy(x, [rec], (r) => r.date));
   const addSession = (s) => setManualSessions((x) => [...x, s]);
   const removeSession = (id) => setManualSessions((x) => x.filter((s) => s.id !== id));
-  const resetAll = () => { setDoses([]); setSleep([]); setManualSessions([]); setLifts([]); setDays([]); setSettings(DEFAULT_SETTINGS); };
+  const resetAll = () => { setDoses([]); setSleep([]); setManualSessions([]); setLifts([]); setDays([]); setSpend([]); setSettings(DEFAULT_SETTINGS); };
   const goLog = (k) => { setDayKey(k); setTab("log"); };
 
   const raceDate = settings.race.date ? fromDayKey(settings.race.date) : null;
   const daysOut = raceDate ? Math.ceil((raceDate - new Date()) / 864e5) : null;
 
-  const tabs = [["log", "Log"], ["overview", "Overview"], ["sleep", "Sleep"], ["training", "Training"], ["intake", "Intake"], ["data", "Data"]];
+  const tabs = [["log", "Log"], ["overview", "Overview"], ["sleep", "Sleep"], ["training", "Training"], ["intake", "Intake"], ["calendar", "Calendar"], ["spend", "Spend"], ["data", "Data"]];
 
   if (!loaded) {
     return <div className={`hl t-${theme}`}><style>{CSS}</style><div className="wrap"><p className="note">Opening your log…</p></div></div>;
@@ -3200,7 +3678,7 @@ export default function HealthLog({ email, onSignOut }) {
           ))}
         </nav>
 
-        {tab !== "log" && tab !== "data" && <RangeBar value={range} onChange={setRange} />}
+        {tab !== "log" && tab !== "data" && tab !== "calendar" && <RangeBar value={range} onChange={setRange} />}
 
         {tab === "log" && (
           <Boundary where="The log sheet">
@@ -3212,10 +3690,21 @@ export default function HealthLog({ email, onSignOut }) {
         {tab === "sleep" && <Boundary where="Sleep"><SleepDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
         {tab === "training" && <Boundary where="Training"><TrainingDash sessions={sessions} days={days} doses={doses} sleep={sleep} settings={settings} setSettings={setSettings} range={range} /></Boundary>}
         {tab === "intake" && <Boundary where="Intake"><IntakeDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
+        {tab === "calendar" && (
+          <Boundary where="The calendar">
+            <CalendarWrap doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} setSettings={setSettings} />
+          </Boundary>
+        )}
+        {tab === "spend" && (
+          <Boundary where="Spend">
+            <SpendDashWrap doses={doses} sleep={sleep} sessions={sessions} days={days} spend={spend} setSpend={setSpend}
+                           settings={settings} setSettings={setSettings} range={range} />
+          </Boundary>
+        )}
         {tab === "data" && (
           <Boundary where="The data tab">
-          <Data state={{ doses, sleep, sessions: manualSessions, lifts, days, settings }} setSleep={setSleep} setSessions={setManualSessions}
-                setLifts={setLifts} setDoses={setDoses} setDays={setDays} settings={settings} setSettings={setSettings}
+          <Data state={{ doses, sleep, sessions: manualSessions, lifts, days, spend, settings }} setSleep={setSleep} setSessions={setManualSessions}
+                setLifts={setLifts} setDoses={setDoses} setDays={setDays} setSpend={setSpend} settings={settings} setSettings={setSettings}
                 resetAll={resetAll} storageOk={storageOk} />
           </Boundary>
         )}

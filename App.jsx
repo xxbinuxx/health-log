@@ -508,6 +508,12 @@ const CSS = `
 .hl .cell .dmark{font-size:10px;margin-top:1px;}
 .hl .cell .dmark.done{color:var(--run);} .hl .cell .dmark.short{color:var(--lift);}
 .hl .cell .dmark.missed{color:var(--alert);} .hl .cell .dmark.extra{color:var(--sleep);}
+.hl .cell[draggable="true"]{cursor:grab;}
+.hl .cell[draggable="true"]:active{cursor:grabbing;}
+.hl .cell.dragging{opacity:.45;border-style:dashed;}
+.hl .cell.moved{border-color:var(--navy);}
+.hl .cell.past{background:color-mix(in srgb, var(--paper) 60%, transparent);}
+.hl tr.pastweek td{opacity:.85;}
 @media(max-width:700px){.hl .cell{height:52px;padding:3px 2px;} .hl .cell .dsub{display:none;}}
 .hl .scorerow{display:grid;grid-template-columns:minmax(160px,210px) 1fr;gap:18px;align-items:start;}
 @media(max-width:700px){.hl .scorerow{grid-template-columns:1fr;}}
@@ -2591,6 +2597,14 @@ function Calendar({ daily, settings, setSettings }) {
   const goalSec = parseGoalTime(race.goalTime);
   const ready = race.date && goalSec && race.date >= today;
   const [pick, setPick] = useState(null);
+  const [drag, setDrag] = useState(null);
+  const [showPast, setShowPast] = useState(false);
+
+  const swap = (from, to) => {
+    if (!from || !to || from === to) return;
+    setSettings({ ...settings, planSwaps: [...(settings.planSwaps || []), [from, to]] });
+  };
+  const clearSwaps = () => setSettings({ ...settings, planSwaps: [] });
 
   const plan = useMemo(() => {
     if (!ready) return null;
@@ -2691,6 +2705,17 @@ function Calendar({ daily, settings, setSettings }) {
               </p>
             );
           })()}
+          {plan.type.bigTarget > 0 && (() => {
+            const want = plan.prefs.twentyTarget ?? plan.type.bigTarget;
+            const doneBig = plan.past.flatMap((w) => w.days).filter((d) => (d.miles || 0) >= plan.type.peakLong * 0.95).length;
+            const plannedBig = plan.weeks.flatMap((w) => w.days).filter((d) => (d.miles || 0) >= plan.type.peakLong * 0.95 && d.kind !== "race").length;
+            return (
+              <p className="note" style={{ marginBottom: 10 }}>
+                <b>Runs at {plan.type.peakLong}+:</b> {doneBig} already done in the last six months, {plannedBig} scheduled before race day
+                {doneBig + plannedBig >= want ? ` — that covers the ${want} you want.` : `, ${want - doneBig - plannedBig} short of the ${want} you want.`}
+              </p>
+            );
+          })()}
           {plan.goal.notes.length > 0 && (
             <div className="note" style={{ paddingLeft: 10, borderLeft: `3px solid ${vColor}` }}>
               {plan.goal.notes.map((n, i) => <div key={i} style={{ marginBottom: 3 }}>{n}</div>)}
@@ -2741,38 +2766,57 @@ function Calendar({ daily, settings, setSettings }) {
       </div>
 
       <div className="panel">
-        <h2>Calendar <span className="hint">built forward from where you are; it rebuilds as you log</span></h2>
+        <h2>Calendar
+          <span className="seg" style={{ fontSize: 12 }}>
+            <button aria-pressed={!showPast} onClick={() => setShowPast(false)} style={{ padding: "3px 9px", fontSize: 12 }}>Ahead</button>
+            <button aria-pressed={showPast} onClick={() => setShowPast(true)} style={{ padding: "3px 9px", fontSize: 12 }}>Since {fmtShort(plan.past[0]?.monday || today)}</button>
+          </span>
+        </h2>
         <div className="body" style={{ overflowX: "auto" }}>
+          <p className="note" style={{ marginBottom: 8 }}>
+            Drag a session onto another day to swap them — useful when the long run has to move off Sunday.
+            {(settings.planSwaps || []).length > 0 && <> {(settings.planSwaps || []).length} move{(settings.planSwaps || []).length === 1 ? "" : "s"} applied. <button className="del" onClick={clearSwaps} style={{ fontSize: 12 }}>reset</button></>}
+          </p>
           <table className="cal">
             <thead><tr><th style={{ width: 54 }}></th>{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => <th key={d}>{d}</th>)}<th className="num" style={{ width: 58 }}>{u}</th></tr></thead>
             <tbody>
-              {plan.weeks.map((w) => {
+              {[...(showPast ? plan.past.filter((w) => w.any) : []), ...plan.weeks].map((w, wi) => {
                 const byDow = {};
                 for (const d of w.days) byDow[fromDayKey(d.date).getDay()] = d;
                 return (
-                  <tr key={w.week}>
+                  <tr key={w.monday} className={w.past ? "pastweek" : ""}>
                     <td style={{ color: "var(--faint)", fontSize: 11 }}>
-                      wk{w.week}<br /><span style={{ color: kindColor("run"), fontSize: 10 }}>{w.phase}</span>
+                      {w.past ? fmtShort(w.monday) : `wk${w.week}`}
+                      <br /><span style={{ color: w.past ? "var(--faint)" : kindColor("run"), fontSize: 10 }}>{w.phase}</span>
                     </td>
                     {[1, 2, 3, 4, 5, 6, 0].map((dow) => {
                       const d = byDow[dow];
                       if (!d) return <td key={dow} className="cell empty-cell" />;
                       const m = w.marks?.[d.date];
                       const isToday = d.date === today;
+                      const draggable = !w.past && d.date >= today && d.kind !== "race";
                       return (
-                        <td key={dow} className={`cell${isToday ? " today" : ""}`} onClick={() => setPick(d)}>
+                        <td key={dow}
+                            className={`cell${isToday ? " today" : ""}${w.past ? " past" : ""}${drag === d.date ? " dragging" : ""}${d.moved ? " moved" : ""}`}
+                            draggable={draggable}
+                            onDragStart={draggable ? (e) => { setDrag(d.date); e.dataTransfer.effectAllowed = "move"; } : undefined}
+                            onDragOver={draggable ? (e) => e.preventDefault() : undefined}
+                            onDrop={draggable ? (e) => { e.preventDefault(); swap(drag, d.date); setDrag(null); } : undefined}
+                            onDragEnd={() => setDrag(null)}
+                            onClick={() => setPick({ ...d, week: w })}>
                           <div className="dnum">{fromDayKey(d.date).getDate()}</div>
-                          <div className="dtitle" style={{ color: kindColor(d.kind) }}>
-                            {d.kind === "rest" ? "rest" : d.miles ? `${d.miles} ${u}` : "lift"}
+                          <div className="dtitle" style={{ color: w.past ? (d.miles ? HEX.rest : "var(--faint)") : kindColor(d.kind) }}>
+                            {d.kind === "rest" ? (w.past ? "—" : "rest") : d.miles ? `${d.miles} ${u}` : "lift"}
                           </div>
-                          <div className="dsub">{d.kind === "rest" ? "" : d.title.replace(" run", "").replace("Marathon-pace", "MP")}</div>
+                          <div className="dsub">{d.kind === "rest" ? "" : d.title.replace(" run", "").replace("Race-pace", "RP")}</div>
                           {m && <div className={`dmark ${m.verdict.replace(/\s/g, "-")}`}>{vMark[m.verdict] ?? ""} {m.actualMiles > 0 ? `${m.actualMiles}` : ""}</div>}
+                          {w.past && d.miles >= plan.type.peakLong * 0.95 && <div className="dmark done">★</div>}
                         </td>
                       );
                     })}
                     <td className="num" style={{ fontSize: 12 }}>
                       {w.plannedMiles}
-                      {w.doneMiles != null && <div style={{ color: "var(--faint)", fontSize: 11 }}>{w.doneMiles} done</div>}
+                      {!w.past && w.doneMiles != null && <div style={{ color: "var(--faint)", fontSize: 11 }}>{w.doneMiles} done</div>}
                     </td>
                   </tr>
                 );
@@ -2784,25 +2828,48 @@ function Calendar({ daily, settings, setSettings }) {
             <span><i style={{ background: HEX.lift }} />lift</span>
             <span><i style={{ background: HEX.rest }} />rest</span>
             <span><i style={{ background: HEX.alert }} />race</span>
-            <span>✓ done · ~ short · × missed · + extra</span>
+            <span>✓ done · ~ short · × missed · + extra · ★ a run at {plan.type.peakLong}+</span>
           </div>
         </div>
       </div>
 
-      {pick && (
-        <div className="panel">
-          <h2>{pick.dow} {fmtDayLabel(pick.date)} <button className="del" onClick={() => setPick(null)} style={{ fontSize: 13 }}>close</button></h2>
-          <div className="body">
-            <div className="row" style={{ marginBottom: 8 }}>
-              <span className={`tag ${pick.kind === "race" ? "run" : pick.kind}`}>{pick.kind}</span>
-              <b style={{ fontSize: 15 }}>{pick.title}</b>
-              {pick.miles ? <span className="note">{pick.miles} {u}{pick.pace ? ` at ${secsToClock(pick.pace)}/${u}` : ""}</span> : null}
+      {pick && (() => {
+        const x = daily.get(pick.date);
+        const prev = daily.get(addDays(pick.date, -1));
+        const isPast = pick.date < today;
+        return (
+          <div className="panel">
+            <h2>{pick.dow} {fmtDayLabel(pick.date)} <button className="del" onClick={() => setPick(null)} style={{ fontSize: 13 }}>close</button></h2>
+            <div className="body">
+              <div className="row" style={{ marginBottom: 8 }}>
+                <span className={`tag ${pick.kind === "race" ? "run" : pick.kind}`}>{pick.kind}</span>
+                <b style={{ fontSize: 15 }}>{pick.title}</b>
+                {pick.miles ? <span className="note">{pick.miles} {u}{pick.pace ? ` at ${secsToClock(pick.pace)}/${u}` : ""}</span> : null}
+              </div>
+              {pick.note && <p className="note" style={{ color: "var(--ink)" }}>{pick.note}</p>}
+              {pick.flexible && !isPast && <p className="note" style={{ marginTop: 6 }}>Drag it to Friday or Saturday if the weekend demands — the plan only cares that it happens.</p>}
+
+              <div className="divline" />
+              <div className="grid4" style={{ gap: 12 }}>
+                <Stat v={x.sleep?.score ?? null} l="slept" color={HEX.sleep}
+                      sub={x.sleep?.asleepMin ? minsToHM(x.sleep.asleepMin) : "not logged"} />
+                <Stat v={x.sleep?.restingHr ?? null} l="resting HR" color={HEX.rhr} />
+                <Stat v={prev.alc || prev.thcMg ? [prev.alc ? `${round(prev.alc, 1)} drinks` : null, prev.thcMg ? `${round(prev.thcMg, 1)} mg` : null].filter(Boolean).join(", ") : "clean"}
+                      l="the night before" color={prev.alc > 4.5 || prev.thcMg > 5 ? HEX.alert : HEX.rest} />
+                <Stat v={x.hasRun ? `${round(toUnit(x.runKm, u), 1)} ${u}` : x.hasLift ? "lift" : isPast ? "nothing" : "—"}
+                      l={isPast ? "what you actually did" : "logged so far"} color={x.hasRun ? HEX.run : HEX.rest}
+                      sub={x.paceSecKm ? `${secsToClock(u === "mi" ? x.paceSecKm * 1.609344 : x.paceSecKm)}/${u}` : ""} />
+              </div>
+              {x.note && <p className="note" style={{ marginTop: 10 }}>{x.note}</p>}
+              {!isPast && pick.miles >= plan.type.peakLong * 0.9 && (
+                <p className="note" style={{ marginTop: 10 }}>
+                  A big one. Worth a quiet night before — the Sleep tab shows your score drops after drinking, and that shows up in pace the next morning.
+                </p>
+              )}
             </div>
-            {pick.note && <p className="note" style={{ color: "var(--ink)" }}>{pick.note}</p>}
-            {pick.flexible && <p className="note" style={{ marginTop: 6 }}>Long runs can move to Friday or Saturday if the weekend demands it — the plan only cares that it happens.</p>}
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       <div className="panel">
         <h2>Paces <span className="hint">from your goal time</span></h2>

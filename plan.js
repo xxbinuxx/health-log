@@ -120,6 +120,44 @@ function volumeFor(T, ambition) {
 }
 const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+/* Past weeks rendered in the same shape as plan weeks, so one calendar can show both.
+   These are facts, not prescriptions: whatever you logged is what appears. */
+export function historyWeeks(daily, settings, fromKey, toKey) {
+  const u = settings.distanceUnit || "mi";
+  const out = [];
+  for (let monday = mondayOf(fromKey); monday <= toKey; monday = addDays(monday, 7)) {
+    const days = [];
+    let any = false;
+    for (let d = 0; d < 7; d++) {
+      const date = addDays(monday, d);
+      if (date > toKey) break;
+      const x = daily.get(date);
+      const dow = fromDayKey(date).getDay();
+      const miles = round(toUnit(x.runKm, u), 1);
+      const runs = x.sessions.filter((r) => r.kind === "run");
+      const type = runs.map((r) => r.type).filter(Boolean)[0] || null;
+      if (miles || x.hasLift) any = true;
+      days.push({
+        date, dow: DAY_NAMES[dow], past: true,
+        kind: miles ? "run" : x.hasLift ? "lift" : "rest",
+        title: miles ? (type ? type[0].toUpperCase() + type.slice(1) : "Run") : x.hasLift ? "Lift" : "—",
+        miles: miles || null,
+        pace: x.paceSecKm ? (u === "mi" ? x.paceSecKm * 1.609344 : x.paceSecKm) : null,
+        sleep: x.sleep?.score ?? null, rhr: x.sleep?.restingHr ?? null,
+        drinks: round(x.alc, 1) || 0, thc: round(x.thcMg, 1) || 0,
+        note: x.note || "",
+      });
+    }
+    const miles = round(sum(days.map((d) => d.miles || 0)), 1);
+    out.push({
+      monday, days, past: true, plannedMiles: miles, doneMiles: miles,
+      longMiles: Math.max(0, ...days.map((d) => d.miles || 0)) || null,
+      phase: "done", any,
+    });
+  }
+  return out;
+}
+
 /* Current form, read from the log rather than assumed. */
 export function currentForm(daily, settings, todayKey, T, goalSeconds, priorRace) {
   const u = settings.distanceUnit || "mi";
@@ -204,6 +242,8 @@ export const DEFAULT_PREFS = {
   liftDays: [3, 5],        // Wednesday and Friday
   restDay: 1,              // Monday
   maxJump: 4,              // most a long run may grow beyond anything you have done
+  intervalMiles: 4,        // total for a session including warm-up and cool-down
+  historyMonths: 6,        // how far back the calendar reaches
 };
 
 /* A prior race is a far better predictor than any training run, so it wins when present.
@@ -396,17 +436,21 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
         weekDays.push({ date, dow: DAY_NAMES[dow], kind: "rest", title: "Rest", note: "Complete day off." });
       } else if (dow === P0.intervalDay) {
         // short races want short and fast; long ones want sustained
+        // sized to what you actually do: the session total, warm-up and cool-down included
+        const total = P0.intervalMiles || 4;
+        const work = Math.max(1, round(total - 2, 1));          // a mile each side
+        const reps = (d, each) => Math.max(3, Math.round((work * 1609) / d));
         const menu = {
-          track:     [["8 × 400 m", P.rep, 5], ["6 × 600 m", P.rep, 5], ["10 × 200 m", P.rep, 4]],
-          vo2:       [["6 × 800 m", P.interval, 7], ["5 × 1000 m", P.interval, 7], ["12 × 400 m", P.rep, 6]],
-          threshold: [["4 × 1 mile", P.tempo, 8], ["6 × 800 m", P.interval, 7], ["20 min tempo", P.tempo, 7]],
-          marathon:  [["6 × 800 m", P.interval, 7], ["5 × 1 mile", P.tempo, 9], ["3 × 2 mile", P.tempo, 10]],
-          ultra:     [["5 × 1 mile", P.tempo, 9], ["30 min tempo", P.tempo, 8], ["6 × 800 m", P.interval, 7]],
-        }[T.quality] || [["6 × 800 m", P.interval, 7]];
-        const [set, pace, miles] = menu[w % menu.length];
-        weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: "Intervals",
-          miles: inTaper ? Math.max(4, Math.round(miles * 0.6)) : miles, pace,
-          note: `${inTaper ? "Half the usual volume: " : ""}${set} at ${secsToClock(pace)}/${u}, equal jog recovery. Warm up and cool down either side.` });
+          track:     [[`${reps(400)} × 400 m`, P.rep], [`${reps(600)} × 600 m`, P.rep], [`${reps(200)} × 200 m`, P.rep]],
+          vo2:       [[`${reps(800)} × 800 m`, P.interval], [`${reps(1000)} × 1000 m`, P.interval], [`${reps(400)} × 400 m`, P.rep]],
+          threshold: [[`${Math.max(2, Math.round(work))} × 1 mile`, P.tempo], [`${reps(800)} × 800 m`, P.interval], [`${Math.round(work * 8)} min tempo`, P.tempo]],
+          marathon:  [[`${reps(800)} × 800 m`, P.interval], [`${Math.max(2, Math.round(work))} × 1 mile`, P.tempo], [`${Math.max(2, Math.round(work / 2))} × 2 mile`, P.tempo]],
+          ultra:     [[`${Math.max(2, Math.round(work))} × 1 mile`, P.tempo], [`${Math.round(work * 8)} min tempo`, P.tempo], [`${reps(800)} × 800 m`, P.interval]],
+        }[T.quality] || [[`${reps(800)} × 800 m`, P.interval]];
+        const [set, pace] = menu[w % menu.length];
+        const miles = inTaper ? Math.max(3, round(total * 0.7, 1)) : total;
+        weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: "Intervals", miles, pace,
+          note: `${set} at ${secsToClock(pace)}/${u}, equal jog recovery. A mile warm-up and cool-down either side — ${miles} ${u} in total.` });
       } else if (dow === longDow) {
         weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: longMi >= T.peakLong ? `Long run — ${T.peakLong}` : "Long run",
           miles: longMi, pace: P.long, flexible: true,
@@ -458,9 +502,30 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
     });
   }
 
+  // anything dragged to another day, applied after the plan is drawn
+  const swaps = settings.planSwaps || [];
+  if (swaps.length) {
+    const byDate = new Map();
+    for (const w of out) for (const d of w.days) byDate.set(d.date, d);
+    for (const [from, to] of swaps) {
+      const a = byDate.get(from), b = byDate.get(to);
+      if (!a || !b || a.kind === "race" || b.kind === "race") continue;
+      const keep = ["kind", "title", "miles", "pace", "note", "flexible"];
+      const tmp = Object.fromEntries(keep.map((k) => [k, a[k]]));
+      for (const k of keep) a[k] = b[k];
+      for (const k of keep) b[k] = tmp[k];
+      a.moved = true; b.moved = true;
+    }
+    for (const w of out) w.plannedMiles = round(sum(w.days.map((d) => d.miles || 0)), 1);
+  }
+
   const tracked = adherence(out, daily, settings, todayKey);
   const goal = assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T, form, reachedPeak);
-  return { weeks: tracked, fit, form, goal, predicted, paces: P, raceDate, raceName, goalSeconds,
+  const months = P0.historyMonths ?? 6;
+  const historyFrom = toDayKey(new Date(fromDayKey(raceDate).getTime() - months * 30.44 * 864e5));
+  const past = historyWeeks(daily, settings, historyFrom, addDays(startMon, -1));
+
+  return { weeks: tracked, past, fit, form, goal, predicted, paces: P, raceDate, raceName, goalSeconds,
     unit: u, prefs: P0, twenties, type: T, history: form.hist };
 }
 

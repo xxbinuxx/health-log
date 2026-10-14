@@ -120,6 +120,66 @@ function volumeFor(T, ambition) {
 }
 const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+/* The vocabulary the chat is allowed to speak. Anything outside this is ignored,
+   and anything inside it is still checked against the rules below before it lands. */
+export const ADJUST_OPS = {
+  setLong: "set the long run for a given week, in miles",
+  setWeekVolume: "set the total mileage for a given week",
+  move: "swap the sessions on two dates",
+  setIntervalMiles: "change the standard interval session length",
+  setIntervalDay: "move interval day (0 Sunday … 6 Saturday)",
+  setRestDay: "move the weekly rest day",
+  setLongRunDay: "move the weekly long run day",
+  setTwentyTarget: "change how many peak long runs to fit",
+};
+
+/* The constraints that survive any instruction. These exist because a plan that
+   injures you is worse than no plan. */
+export function checkAdjustment(a, ctx) {
+  const { weeks, T, ladder, volumes, longestRecent, raceWeekIndex, taperStart } = ctx;
+  const no = (why) => ({ ok: false, why });
+  switch (a.op) {
+    case "setLong": {
+      const i = Number(a.week) - 1;
+      if (!(i >= 0 && i < weeks)) return no(`there is no week ${a.week}`);
+      const mi = Number(a.miles);
+      if (!(mi > 0)) return no("that is not a distance");
+      if (i >= taperStart) return no(`week ${a.week} is in the taper — long runs come down there, they do not go up`);
+      const prevMax = Math.max(longestRecent, ...ladder.slice(0, i).filter((x) => x != null));
+      if (mi > prevMax + 4) return no(`${mi} is more than four beyond anything before it (${round(prevMax, 1)}); that jump is where injuries come from`);
+      if (mi > (volumes[i] ?? 0) * 0.6) return no(`${mi} would be most of that week's ${round(volumes[i], 0)} miles — raise the week first`);
+      return { ok: true };
+    }
+    case "setWeekVolume": {
+      const i = Number(a.week) - 1;
+      if (!(i >= 0 && i < weeks)) return no(`there is no week ${a.week}`);
+      const mi = Number(a.miles);
+      if (!(mi > 0)) return no("that is not a distance");
+      if (i >= taperStart && mi > (volumes[i] ?? 0) * 1.15) return no("that week is in the taper; raising it defeats the point of tapering");
+      const prev = i > 0 ? volumes[i - 1] : null;
+      if (prev && mi > prev * 1.15) return no(`that is a ${Math.round(((mi - prev) / prev) * 100)}% jump on the week before; 10% or so is the usual ceiling`);
+      return { ok: true };
+    }
+    case "move": {
+      if (!a.from || !a.to) return no("needs two dates");
+      return { ok: true };
+    }
+    case "setIntervalMiles": return Number(a.miles) > 0 && Number(a.miles) <= 20 ? { ok: true } : no("between 1 and 20 miles");
+    case "setIntervalDay":
+    case "setRestDay":
+    case "setLongRunDay": {
+      const d = Number(a.dow);
+      return d >= 0 && d <= 6 ? { ok: true } : no("day must be 0 to 6");
+    }
+    case "setTwentyTarget": {
+      const n = Number(a.count);
+      if (!(n >= 0 && n <= 5)) return no("between 0 and 5");
+      return { ok: true };
+    }
+    default: return no(`"${a.op}" is not something I can change`);
+  }
+}
+
 /* Past weeks rendered in the same shape as plan weeks, so one calendar can show both.
    These are facts, not prescriptions: whatever you logged is what appears. */
 export function historyWeeks(daily, settings, fromKey, toKey) {
@@ -396,7 +456,36 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
   for (const f of taperShape) volumes.push(reachedPeak * f);
 
   // a long run should not be more than about 55% of the week it sits in
-  const ladder = ladderRaw.map((x, i) => (x == null ? null : Math.min(x, Math.max(6, Math.round((volumes[i] ?? from) * 0.55)))));
+  let ladder = ladderRaw.map((x, i) => (x == null ? null : Math.min(x, Math.max(6, Math.round((volumes[i] ?? from) * 0.55)))));
+
+  /* Adjustments asked for in the chat. Each is checked before it lands; anything
+     refused comes back with a reason so the chat can say why. */
+  const adjustments = settings.planAdjust || [];
+  const applied = [], rejected = [];
+  const taperStart = weeks - T.taperWeeks;
+  for (const a of adjustments) {
+    const ctx = { weeks, T, ladder, volumes, longestRecent: Math.max(fit.longest, 8), raceWeekIndex: weeks - 1, taperStart };
+    const v = checkAdjustment(a, ctx);
+    if (!v.ok) { rejected.push({ ...a, why: v.why }); continue; }
+    switch (a.op) {
+      case "setLong": ladder[Number(a.week) - 1] = Number(a.miles); break;
+      case "setWeekVolume": volumes[Number(a.week) - 1] = Number(a.miles); break;
+      case "setIntervalMiles": P0.intervalMiles = Number(a.miles); break;
+      case "setIntervalDay": P0.intervalDay = Number(a.dow); break;
+      case "setRestDay": P0.restDay = Number(a.dow); break;
+      case "setLongRunDay": P0.longRunDays = [Number(a.dow), ...[0, 6, 5].filter((x) => x !== Number(a.dow))]; break;
+      case "setTwentyTarget": P0.twentyTarget = Number(a.count); break;
+      default: break;
+    }
+    applied.push(a);
+  }
+  // a change to the shape means the ladder is rebuilt around it
+  if (applied.some((a) => ["setTwentyTarget"].includes(a.op))) {
+    const re = longRunLadder(weeks, Math.max(fit.longest, Math.min(6, T.peakLong * 0.4)),
+      P0.twentyTarget ?? T.bigTarget, P0.maxJump ?? 4, T.peakLong, T.taperWeeks);
+    ladder = re.map((x, i) => (x == null ? null : Math.min(x, Math.max(6, Math.round((volumes[i] ?? from) * 0.55)))));
+    for (const a of applied.filter((a) => a.op === "setLong")) ladder[Number(a.week) - 1] = Number(a.miles);
+  }
   const twenties = ladder.filter((x) => x >= T.peakLong).length;
 
   // a jump of more than about 4 miles over your current longest is where injuries live
@@ -503,7 +592,7 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
   }
 
   // anything dragged to another day, applied after the plan is drawn
-  const swaps = settings.planSwaps || [];
+  const swaps = [...(settings.planSwaps || []), ...applied.filter((a) => a.op === "move").map((a) => [a.from, a.to])];
   if (swaps.length) {
     const byDate = new Map();
     for (const w of out) for (const d of w.days) byDate.set(d.date, d);
@@ -526,7 +615,7 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
   const past = historyWeeks(daily, settings, historyFrom, addDays(startMon, -1));
 
   return { weeks: tracked, past, fit, form, goal, predicted, paces: P, raceDate, raceName, goalSeconds,
-    unit: u, prefs: P0, twenties, type: T, history: form.hist };
+    unit: u, prefs: P0, twenties, type: T, history: form.hist, applied, rejected, taperStart };
 }
 
 function assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T, form, reachedPeak) {

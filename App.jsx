@@ -2594,14 +2594,9 @@ function Calendar({ daily, settings, setSettings }) {
 
   const plan = useMemo(() => {
     if (!ready) return null;
-    try { return buildPlan({ todayKey: today, startKey: settings.planStart, raceDate: race.date, raceName: race.name, raceKind: race.kind, goalSeconds: goalSec, daily, settings }); }
+    try { return buildPlan({ todayKey: today, raceDate: race.date, raceName: race.name, raceKind: race.kind, goalSeconds: goalSec, daily, settings }); }
     catch (e) { console.error("plan:", e); return null; }
   }, [ready, race.date, race.name, race.kind, goalSec, daily, settings, today]);
-
-  // anchor the plan the first time it is viewed, so the calendar keeps its history
-  useEffect(() => {
-    if (ready && !settings.planStart) setSettings({ ...settings, planStart: mondayOf(today) });
-  }, [ready, settings.planStart]);
 
   const setRace = (patch) => setSettings({ ...settings, race: { ...settings.race, ...patch } });
   const setPrior = (patch) => setSettings({ ...settings, priorRace: { distanceMi: 26.2, ...(settings.priorRace || {}), ...patch } });
@@ -2642,9 +2637,6 @@ function Calendar({ daily, settings, setSettings }) {
             <input value={prefs.twentyTarget ?? ""} inputMode="numeric" placeholder={String(raceType(race.kind).bigTarget)}
                    onChange={(e) => setPrefs({ twentyTarget: e.target.value === "" ? null : Math.max(0, Math.min(5, Number(e.target.value) || 0)) })} />
           </label>
-          <label className="f" style={{ width: 148 }}>Plan started
-            <input type="date" value={settings.planStart || ""} onChange={(e) => setSettings({ ...settings, planStart: e.target.value || null })} />
-          </label>
         </div>
         <p className="note" style={{ marginTop: 8 }}>
           Intervals stay on Tuesday. A previous race predicts far better than training runs do, so fill it in if you have one — any distance works, it gets converted.
@@ -2664,9 +2656,6 @@ function Calendar({ daily, settings, setSettings }) {
   const kindColor = (k) => (k === "race" ? HEX.alert : k === "lift" ? HEX.lift : k === "rest" ? HEX.rest : HEX.run);
   const vMark = { done: "✓", short: "~", missed: "×", extra: "+", "ran instead": "~", "as planned": "" };
 
-  const doneMiles = sum(plan.weeks.map((w) => w.doneMiles || 0));
-  const plannedSoFar = sum(plan.weeks.map((w) => w.plannedSoFar || 0));
-
   return (
     <>
       {Setup}
@@ -2684,24 +2673,21 @@ function Calendar({ daily, settings, setSettings }) {
             <Stat v={plan.goal.verdict} l="the goal, on what you have" color={vColor} />
             <Stat v={plan.predicted.seconds ? secsToClock(plan.predicted.seconds) : null} l="equivalent today" color={HEX.rhr}
                   sub={plan.predicted.basis === "prior race" ? "from your previous marathon" : "from your best long run"} />
-            <Stat v={plannedSoFar ? `${Math.round((doneMiles / plannedSoFar) * 100)}%` : null} l="of the plan run so far"
-                  color={!plannedSoFar ? HEX.rest : doneMiles / plannedSoFar >= 0.9 ? HEX.run : doneMiles / plannedSoFar >= 0.7 ? HEX.lift : HEX.alert}
-                  sub={plannedSoFar ? `${round(doneMiles, 0)} of ${round(plannedSoFar, 0)} ${u}` : "nothing due yet"} />
+            <Stat v={plan.form.gap > 0 ? `+${plan.form.gap}` : `${plan.form.gap}`} l={`${u}/week still to add`}
+                  color={plan.form.gap <= 0 ? HEX.run : plan.form.gap <= 10 ? HEX.lift : HEX.alert}
+                  sub={`${plan.form.recentWeekly} now, this goal wants about ${plan.form.need.peak}`} />
             <Stat v={round(sum(plan.weeks.map((w) => w.plannedMiles)), 0)} l={`${u} to race day`} color={HEX.lift}
                   sub={`peak week ${Math.max(...plan.weeks.map((w) => w.plannedMiles))} ${u}`} />
           </div>
           {(() => {
-            const done = plan.weeks.filter((w) => w.status === "done");
-            if (!done.length) return null;
-            const pct = plannedSoFar ? (doneMiles / plannedSoFar) * 100 : 0;
-            const longestDone = Math.max(0, ...done.map((w) => w.longestDone || 0));
-            const bigDone = done.filter((w) => (w.longestDone || 0) >= plan.type.peakLong * 0.95).length;
-            const word = pct >= 95 ? "on plan" : pct >= 80 ? "a little behind" : pct >= 60 ? "well behind" : "off the plan";
+            const cur = plan.weeks[0];
+            if (!cur || cur.doneMiles == null) return null;
+            const pct = cur.plannedSoFar ? (cur.doneMiles / cur.plannedSoFar) * 100 : null;
             return (
               <p className="note" style={{ marginBottom: 10 }}>
-                <b>Tracking: {word}.</b> {done.length} week{done.length === 1 ? "" : "s"} done at {Math.round(pct)}% of planned {u}.
-                Longest completed {longestDone} {u}{plan.type.bigTarget ? `, ${bigDone} of ${plan.type.bigTarget} at ${plan.type.peakLong}` : ""}.
-                {pct < 80 ? " The weeks ahead rebuild from what you actually ran, so the ladder has already eased." : ""}
+                <b>This week so far:</b> {cur.doneMiles} of {cur.plannedSoFar} {u} due by today
+                {pct != null ? ` (${Math.round(pct)}%)` : ""}, {cur.plannedMiles} {u} planned for the week.
+                {" "}Miss a session and next week is rebuilt smaller, not piled on top.
               </p>
             );
           })()}
@@ -2714,7 +2700,48 @@ function Calendar({ daily, settings, setSettings }) {
       </div>
 
       <div className="panel">
-        <h2>Calendar <span className="hint">ticks are what you did; the plan ahead adapts to it</span></h2>
+        <h2>Where you are <span className="hint">read from everything you have logged, not assumed</span></h2>
+        <div className="body">
+          <div className="grid4" style={{ gap: 12, marginBottom: 12 }}>
+            <Stat v={plan.form.recentWeekly} l={`${u} / week, last 4 weeks`} color={HEX.run}
+                  sub={plan.form.trend == null ? "" : `${plan.form.trend > 0 ? "up" : "down"} ${Math.abs(plan.form.trend)}% on the month before`} />
+            <Stat v={plan.form.longest} l={`longest run, 90 days (${u})`} color={HEX.run}
+                  sub={plan.type.bigTarget ? `the plan wants ${plan.type.peakLong}` : ""} />
+            <Stat v={plan.form.stamina} l="Stamina" color={HEX.lift}
+                  sub={plan.form.freshness == null ? "" : plan.form.freshness >= 5 ? `rested (+${plan.form.freshness}%)`
+                    : plan.form.freshness > -15 ? `normal fatigue (${plan.form.freshness}%)` : `carrying fatigue (${plan.form.freshness}%)`} />
+            <Stat v={plan.form.consistency != null ? `${plan.form.consistency}%` : null} l="weeks run, last 8" color={HEX.sleep}
+                  sub={`needs about ${plan.form.need.peak} ${u}/week at peak`} />
+          </div>
+          {plan.history.length > 1 && (
+            <>
+              <Chart h={160}>
+                <ComposedChart data={[
+                  ...plan.history.map((h) => ({ label: fmtShort(h.monday), done: h.miles, long: h.longest })),
+                  ...plan.weeks.map((w) => ({ label: fmtShort(w.monday), plan: w.plannedMiles, long: w.longMiles ?? plan.type.miles })),
+                ]} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+                  <CartesianGrid stroke={HEX.grid} vertical={false} />
+                  <XAxis dataKey="label" tick={axisTick()} interval={Math.max(1, Math.ceil((plan.history.length + plan.weeks.length) / 10))} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                  <YAxis tick={axisTick()} tickLine={false} axisLine={false} />
+                  <Tooltip content={<Tip fmt={(p) => `${p.value} ${u}`} />} />
+                  <Bar dataKey="done" name="Ran" fill={HEX.rest} radius={[2, 2, 0, 0]} />
+                  <Bar dataKey="plan" name="Planned" fill={HEX.run} radius={[2, 2, 0, 0]} />
+                  <Line type="monotone" dataKey="long" name="Long run" stroke={HEX.sleep} strokeWidth={1.8} dot={false} connectNulls />
+                </ComposedChart>
+              </Chart>
+              <div className="legend">
+                <span><i style={{ background: HEX.rest }} />what you actually ran</span>
+                <span><i style={{ background: HEX.run }} />what the plan asks for</span>
+                <span><i style={{ background: HEX.sleep }} />long run</span>
+                <span>the plan starts where the history leaves off</span>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="panel">
+        <h2>Calendar <span className="hint">built forward from where you are; it rebuilds as you log</span></h2>
         <div className="body" style={{ overflowX: "auto" }}>
           <table className="cal">
             <thead><tr><th style={{ width: 54 }}></th>{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => <th key={d}>{d}</th>)}<th className="num" style={{ width: 58 }}>{u}</th></tr></thead>

@@ -42,6 +42,8 @@ const DEFAULT_SETTINGS = {
   theme: "light",
   peerSocialMax: 150,
   planStart: null,
+  planAdjust: [],
+  planSwaps: [],
   priorRace: { time: "", distanceMi: 26.2, date: "" },
   planPrefs: { ...DEFAULT_PREFS },
   currency: "$",
@@ -508,6 +510,11 @@ const CSS = `
 .hl .cell .dmark{font-size:10px;margin-top:1px;}
 .hl .cell .dmark.done{color:var(--run);} .hl .cell .dmark.short{color:var(--lift);}
 .hl .cell .dmark.missed{color:var(--alert);} .hl .cell .dmark.extra{color:var(--sleep);}
+.hl .chatbox{max-height:280px;overflow-y:auto;margin-bottom:12px;display:flex;flex-direction:column;gap:8px;}
+.hl .bubble{padding:8px 11px;border-radius:10px;font-size:13.5px;line-height:1.5;max-width:88%;}
+.hl .bubble.user{align-self:flex-end;background:var(--navy);color:var(--paper);border-bottom-right-radius:3px;}
+.hl .bubble.coach{align-self:flex-start;background:var(--rule-soft);color:var(--ink);border-bottom-left-radius:3px;}
+.hl .bubble.err{background:none;border:1px solid var(--alert);color:var(--alert);}
 .hl .cell[draggable="true"]{cursor:grab;}
 .hl .cell[draggable="true"]:active{cursor:grabbing;}
 .hl .cell.dragging{opacity:.45;border-style:dashed;}
@@ -2588,6 +2595,107 @@ function SpendImport({ spend, setSpend, settings }) {
   );
 }
 
+/* A chat that can reshape the plan. It proposes changes; plan.js decides whether they
+   are allowed, and says why when they are not. */
+function PlanChat({ plan, settings, setSettings }) {
+  const [msgs, setMsgs] = useState([]);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const boxRef = useRef(null);
+
+  const adjustments = settings.planAdjust || [];
+  const send = async (override) => {
+    const message = (override ?? text).trim();
+    if (!message || busy) return;
+    setText(""); setBusy(true);
+    const history = [...msgs, { role: "user", text: message }];
+    setMsgs(history);
+    try {
+      const j = await callFn("/.netlify/functions/plan-chat", {
+        method: "POST", body: { message, history: msgs.slice(-6) },
+      });
+      if (j.adjustments?.length) {
+        setSettings({ ...settings, planAdjust: [...adjustments, ...j.adjustments] });
+      }
+      setMsgs([...history, { role: "coach", text: j.reply, adjustments: j.adjustments || [] }]);
+    } catch (e) {
+      setMsgs([...history, { role: "coach", text: String(e.message || e), error: true }]);
+    } finally {
+      setBusy(false);
+      setTimeout(() => boxRef.current?.scrollTo({ top: 1e6 }), 50);
+    }
+  };
+
+  const examples = [
+    "Add two more 20 milers",
+    "Move the long run to Saturday",
+    "I can only run four days a week",
+    "Make week 3 easier, I'm travelling",
+  ];
+
+  return (
+    <div className="panel">
+      <h2>Ask the plan to change
+        <span className="hint">
+          {adjustments.length ? `${adjustments.length} change${adjustments.length === 1 ? "" : "s"} applied` : "it keeps the taper and the build intact"}
+          {adjustments.length ? <> · <button className="del" onClick={() => setSettings({ ...settings, planAdjust: [] })} style={{ fontSize: 12 }}>reset all</button></> : null}
+        </span>
+      </h2>
+      <div className="body">
+        {msgs.length > 0 && (
+          <div ref={boxRef} className="chatbox">
+            {msgs.map((m, i) => (
+              <div key={i} className={`bubble ${m.role}${m.error ? " err" : ""}`}>
+                {m.text}
+                {m.adjustments?.length > 0 && (
+                  <div className="note" style={{ marginTop: 6, color: "var(--faint)" }}>
+                    {m.adjustments.map((a, n) => <div key={n}>· {describe(a)}</div>)}
+                  </div>
+                )}
+              </div>
+            ))}
+            {busy && <div className="bubble coach" style={{ opacity: 0.6 }}>Thinking…</div>}
+          </div>
+        )}
+
+        {plan.rejected?.length > 0 && (
+          <p className="note flag" style={{ marginBottom: 8 }}>
+            {plan.rejected.length} change{plan.rejected.length === 1 ? " was" : "s were"} refused: {plan.rejected.map((r) => r.why).join("; ")}.
+          </p>
+        )}
+
+        <div className="row">
+          <label className="f" style={{ flex: 1, minWidth: 200 }}>
+            <input value={text} placeholder="Add a 20 in week 2 and drop week 4" disabled={busy}
+                   onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
+          </label>
+          <button className="solid" onClick={() => send()} disabled={busy || !text.trim()}>Send</button>
+        </div>
+        {!msgs.length && (
+          <div className="chips" style={{ marginTop: 10 }}>
+            {examples.map((x) => <button key={x} className="tchip" onClick={() => send(x)}>{x}</button>)}
+          </div>
+        )}
+        <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
+          It can move mileage and days around, but it cannot break the shape: no long run more than four beyond
+          the one before, no week more than about 10% up on the last, and nothing rises during the taper.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+const describe = (a) => ({
+  setLong: `week ${a.week} long run → ${a.miles}`,
+  setWeekVolume: `week ${a.week} total → ${a.miles}`,
+  move: `swap ${a.from} and ${a.to}`,
+  setIntervalMiles: `intervals → ${a.miles} miles`,
+  setIntervalDay: `interval day → ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][a.dow]}`,
+  setRestDay: `rest day → ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][a.dow]}`,
+  setLongRunDay: `long run day → ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][a.dow]}`,
+  setTwentyTarget: `peak long runs → ${a.count}`,
+}[a.op] || a.op);
+
 /* The training calendar. Rebuilt from the log every render, so what you actually did
    changes what comes next. Nothing here is generated by a model — it is all arithmetic,
    shaped like Higdon's Intermediate 2 and the BAA's level-four template. */
@@ -2764,6 +2872,8 @@ function Calendar({ daily, settings, setSettings }) {
           )}
         </div>
       </div>
+
+      <PlanChat plan={plan} settings={settings} setSettings={setSettings} />
 
       <div className="panel">
         <h2>Calendar
@@ -3665,6 +3775,8 @@ function withDefaults(st) {
   if (!RACE_TYPES[s.race.kind]) s.race.kind = "marathon";
   s.priorRace = { distanceMi: 26.2, time: "", date: "", ...(s.priorRace || {}) };
   if (s.planStart === undefined) s.planStart = null;
+  if (!Array.isArray(s.planAdjust)) s.planAdjust = [];
+  if (!Array.isArray(s.planSwaps)) s.planSwaps = [];
   s.planPrefs = { ...DEFAULT_PREFS, ...(s.planPrefs || {}) };
   if (!Array.isArray(s.planPrefs.longRunDays) || !s.planPrefs.longRunDays.length) s.planPrefs.longRunDays = DEFAULT_PREFS.longRunDays;
   if (!Array.isArray(s.presets) || !s.presets.length) s.presets = DEFAULT_SETTINGS.presets;

@@ -8,7 +8,7 @@
 
 import {
   addDays, toDayKey, fromDayKey, lastNDays, mondayOf, round, avg, sum, median,
-  toUnit, secsToClock, fmtShort,
+  toUnit, secsToClock, fmtShort, trainingLoad, staminaFrom,
 } from "./scores.js";
 
 const MARATHON_MI = 26.2;
@@ -81,6 +81,71 @@ export function assessFitness(daily, settings, todayKey) {
   return {
     recentWeekly, peakWeekly, weekMiles, longest: round(longest, 1), longestDate,
     medPace, best, vo2, runDaysPerWeek: round(runDays / 4, 1), liftDaysPerWeek: round(liftDays / 4, 1),
+  };
+}
+
+/* Everything you have actually run, week by week, for as far back as the log goes.
+   This is the raw material the forward plan is bent around. */
+export function trainingHistory(daily, settings, todayKey, maxWeeks = 16) {
+  const u = settings.distanceUnit || "mi";
+  const thisMon = mondayOf(todayKey);
+  const out = [];
+  for (let w = maxWeeks; w >= 1; w--) {
+    const monday = addDays(thisMon, -7 * w);
+    const days = lastNDays(7, addDays(monday, 6));
+    const runs = days.flatMap((k) => daily.get(k).sessions.filter((s) => s.kind === "run"));
+    const miles = sum(days.map((k) => toUnit(daily.get(k).runKm, u)));
+    if (!miles && !out.length) continue;                       // skip the empty stretch before you started
+    const longest = Math.max(0, ...days.map((k) => toUnit(daily.get(k).runKm, u)));
+    const paces = days.map((k) => daily.get(k).paceSecKm).filter(Boolean);
+    out.push({
+      monday, miles: round(miles, 1), longest: round(longest, 1),
+      runs: days.filter((k) => daily.get(k).hasRun).length,
+      lifts: days.filter((k) => daily.get(k).hasLift).length,
+      quality: runs.filter((r) => ["tempo", "intervals", "race"].includes(r.type)).length,
+      pace: paces.length ? round(u === "mi" ? avg(paces) * 1.609344 : avg(paces), 0) : null,
+    });
+  }
+  return out;
+}
+
+/* Roughly what a goal of this shape usually asks for in weekly volume.
+   Deliberately a range, because the honest answer is a range. */
+function volumeFor(T, ambition) {
+  const k = { 1: 25, 3.107: 8, 6.214: 5, 13.109: 2.6, 26.2: 1.8, 31.07: 1.6, 50: 1.2 };
+  const base = (k[T.miles] ?? 1.8) * T.miles;
+  // a goal beyond current form needs more volume; one inside it needs less
+  const scale = ambition == null ? 1 : clampNum(1 + ambition * 1.5, 0.8, 1.3);
+  return { peak: Math.round(base * scale), floor: Math.round(base * scale * 0.6) };
+}
+const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/* Current form, read from the log rather than assumed. */
+export function currentForm(daily, settings, todayKey, T, goalSeconds, priorRace) {
+  const u = settings.distanceUnit || "mi";
+  const hist = trainingHistory(daily, settings, todayKey, 16);
+  const fit = assessFitness(daily, settings, todayKey);
+  const { ctl, atl } = trainingLoad(daily, settings, todayKey);
+  const fitness = ctl.get(todayKey) ?? ctl.get(addDays(todayKey, -1)) ?? 0;
+  const fatigue = atl.get(todayKey) ?? atl.get(addDays(todayKey, -1)) ?? 0;
+
+  const last4 = hist.slice(-4), prior4 = hist.slice(-8, -4);
+  const recent = round(avg(last4.map((h) => h.miles)) || 0, 1);
+  const before = round(avg(prior4.map((h) => h.miles)) || 0, 1);
+  const trend = before ? round(((recent - before) / before) * 100, 0) : null;
+  const consistency = hist.length ? round((hist.slice(-8).filter((h) => h.miles > 0).length / Math.min(8, hist.length)) * 100, 0) : null;
+
+  const predicted = predictFrom(fit, priorRace, T.miles);
+  const ambition = predicted.seconds && goalSeconds ? (predicted.seconds - goalSeconds) / goalSeconds : null;
+  const need = volumeFor(T, ambition);
+
+  return {
+    hist, fit, recentWeekly: recent, priorWeekly: before, trend, consistency,
+    fitness: round(fitness, 2), fatigue: round(fatigue, 2),
+    freshness: fitness > 0 ? round(((fitness - fatigue) / fitness) * 100, 0) : null,
+    stamina: round(staminaFrom(fitness, settings), 0),
+    longest: fit.longest, predicted, ambition, need,
+    gap: round(need.peak - recent, 1),
   };
 }
 
@@ -255,18 +320,43 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
   const T = raceType(raceKind || settings.race?.kind || "marathon");
   const P0 = { ...DEFAULT_PREFS, ...(settings.planPrefs || {}), ...(prefs || {}) };
   if (P0.twentyTarget == null || P0.twentyTarget === "") P0.twentyTarget = T.bigTarget;
-  const fit = assessFitness(daily, settings, todayKey);
-  const predicted = predictFrom(fit, settings.priorRace, T.miles);
+  const form = currentForm(daily, settings, todayKey, T, goalSeconds, settings.priorRace);
+  const fit = form.fit;
+  const predicted = form.predicted;
 
-  // anchored to the day the plan was started, so past weeks stay on the calendar
-  const startMon = mondayOf(startKey && startKey <= todayKey ? startKey : todayKey);
+  // forward from this week; the past is read as history rather than replayed as a plan
+  const startMon = mondayOf(todayKey);
   const days = Math.max(0, Math.round((fromDayKey(raceDate) - fromDayKey(startMon)) / 864e5));
   const weeks = Math.max(1, Math.ceil((days + 1) / 7));
   const P = paces(goalSeconds, T.miles);
 
   // the ladder adapts to the longest run you have actually completed recently
-  const ladder = longRunLadder(weeks, Math.max(fit.longest, Math.min(6, T.peakLong * 0.4)),
+  const ladderRaw = longRunLadder(weeks, Math.max(fit.longest, Math.min(6, T.peakLong * 0.4)),
     P0.twentyTarget ?? T.bigTarget, P0.maxJump ?? 4, T.peakLong, T.taperWeeks);
+
+  /* Weekly volume: start from where you actually are, aim at what the goal usually needs,
+     and never grow faster than 8% a week. If the gap is too big to close safely, the plan
+     gets as close as it can and says so rather than prescribing an injury. */
+  const buildWeeks = Math.max(1, weeks - T.taperWeeks);
+  let from = Math.max(form.recentWeekly || T.miles * 0.5, T.miles * 0.4);
+  // deep fatigue right now means the first weeks start below where you have been
+  if (form.freshness != null && form.freshness <= -15) from *= 0.85;
+  const want = form.need.peak;
+  const volumes = [];
+  let v = from;
+  for (let i = 0; i < buildWeeks; i++) {
+    const cutback = i > 0 && (i + 1) % 4 === 0;
+    const step = Math.min(want, v * 1.08);
+    v = cutback ? v * 0.8 : step;
+    volumes.push(v);
+  }
+  const reachedPeak = Math.max(...volumes, from);
+  // descending through the taper: the week before the race is the smallest
+  const taperShape = [0.75, 0.55, 0.4].slice(3 - T.taperWeeks);
+  for (const f of taperShape) volumes.push(reachedPeak * f);
+
+  // a long run should not be more than about 55% of the week it sits in
+  const ladder = ladderRaw.map((x, i) => (x == null ? null : Math.min(x, Math.max(6, Math.round((volumes[i] ?? from) * 0.55)))));
   const twenties = ladder.filter((x) => x >= T.peakLong).length;
 
   // a jump of more than about 4 miles over your current longest is where injuries live
@@ -324,8 +414,13 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
             ? `Last ${Math.min(8, Math.round(longMi / 2.5))} ${u} at ${secsToClock(P.race)}/${u}. Practise race-day fuelling and kit.`
             : `Steady at ${secsToClock(P.long)}/${u}.` });
       } else if (dow === 3) {
-        weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: "Medium-long", miles: inTaper ? 5 : Math.max(6, Math.round(longMi * 0.4)),
+        const room = (volumes[w] ?? from) - (longMi || 0);
+        weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: "Medium-long",
+          miles: inTaper ? 5 : Math.max(3, Math.min(Math.round(longMi * 0.4), Math.round(room * 0.35))),
           pace: P.steady, note: `Steady, around ${secsToClock(P.steady)}/${u}. Lift afterwards if you have it in you.` });
+      } else if (dow === 6 && (volumes[w] ?? from) < (longMi || 0) + 12) {
+        // at low volume there is no room for an extra quality day
+        weekDays.push({ date, dow: DAY_NAMES[dow], kind: "rest", title: "Rest", note: "The long run is doing the work this week." });
       } else if (dow === 6) {
         weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: "Race-pace run", miles: inTaper ? 4 : Math.max(3, Math.min(8, Math.round(T.miles * 0.25))),
           pace: P.race, note: `At ${secsToClock(P.race)}/${u}. This is the session that teaches your legs the pace.` });
@@ -333,24 +428,43 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
         weekDays.push({ date, dow: DAY_NAMES[dow], kind: "lift", title: dow === 5 ? "Lift — upper" : "Lift — legs",
           note: inTaper ? "Light. Movement, not load." : "Nothing that leaves you sore for the long run." });
       } else {
-        weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: "Easy", miles: inTaper ? 3 : 5, pace: P.easy,
+        // whatever is left of the week's volume, spread across the easy days
+        const target = volumes[w] ?? from;
+        const spoken = (longMi || 0) + (inTaper ? 9 : 16);        // intervals, medium-long, race-pace
+        const easyEach = Math.max(2, Math.min(8, Math.round((target - spoken) / 2)));
+        weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: "Easy", miles: inTaper ? 3 : easyEach, pace: P.easy,
           note: `Conversational, around ${secsToClock(P.easy)}/${u}.` });
       }
     }
 
+    // the long run and the quality session are fixed; the rest flexes so the week
+    // lands near its target instead of drifting above it
+    const target = volumes[w] ?? from;
+    const flex = weekDays.filter((d) => d.kind === "run" && d.miles && !["race"].includes(d.kind)
+      && d.title !== "Long run" && !d.title.startsWith("Long run") && d.title !== "Intervals");
+    let planned = sum(weekDays.map((d) => d.miles || 0));
+    if (!isRaceWeek && flex.length && planned > target * 1.05) {
+      const excess = planned - target;
+      const pool = sum(flex.map((d) => d.miles));
+      for (const d of flex) d.miles = Math.max(3, round(d.miles - excess * (d.miles / pool), 1));
+      planned = sum(weekDays.map((d) => d.miles || 0));
+    }
+
     out.push({
       week: w + 1, monday, days: weekDays, longMiles: longMi,
-      plannedMiles: round(sum(weekDays.map((d) => d.miles || 0)), 1),
+      plannedMiles: round(planned, 1),
+      targetMiles: round(target, 1),
         phase: isRaceWeek ? "race" : inTaper ? "taper" : longMi >= T.peakLong ? "peak" : longMi <= T.peakLong * 0.7 ? "cutback" : "build",
     });
   }
 
   const tracked = adherence(out, daily, settings, todayKey);
-  const goal = assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T);
-  return { weeks: tracked, fit, goal, predicted, paces: P, raceDate, raceName, goalSeconds, unit: u, prefs: P0, twenties, type: T };
+  const goal = assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T, form, reachedPeak);
+  return { weeks: tracked, fit, form, goal, predicted, paces: P, raceDate, raceName, goalSeconds,
+    unit: u, prefs: P0, twenties, type: T, history: form.hist };
 }
 
-function assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T) {
+function assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T, form, reachedPeak) {
   const notes = [];
   let verdict = "unknown";
   if (predicted.seconds) {
@@ -372,6 +486,22 @@ function assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T) 
     }
   }
   if (bigJump > 2) notes.push(`The first long run is ${round(bigJump, 1)} beyond your recent longest. Build into it and abandon it if something complains.`);
-  if (T.miles >= 13 && fit.recentWeekly < T.miles * 1.2) notes.push(`You have been averaging ${fit.recentWeekly} a week; this plan asks for more. The easy days are what makes that survivable.`);
-  return { verdict, notes, goalPace: goalSeconds / MARATHON_MI, predicted: predicted.seconds };
+  // what the volume ramp can actually reach, versus what the goal usually wants
+  if (form && reachedPeak) {
+    const want = form.need.peak;
+    if (reachedPeak < want * 0.85) {
+      notes.push(`This goal usually wants around ${want} a week at peak. From ${form.recentWeekly} now, growing no more than 8% a week, the plan tops out near ${Math.round(reachedPeak)} — enough to race well, short of ideal.`);
+    } else {
+      notes.push(`The plan climbs from ${form.recentWeekly} to about ${Math.round(reachedPeak)} a week at peak, which is roughly what this goal asks for.`);
+    }
+    if (form.trend != null && Math.abs(form.trend) >= 15) {
+      notes.push(form.trend > 0
+        ? `Your volume is already up ${form.trend}% on the previous month, so the ramp here is gentler than it looks.`
+        : `Your volume is down ${Math.abs(form.trend)}% on the previous month; the plan rebuilds from where you are now, not where you were.`);
+    }
+    if (form.freshness != null && form.freshness <= -15) {
+      notes.push(`You are carrying real fatigue right now (${form.freshness}%). The first week is deliberately modest.`);
+    }
+  }
+  return { verdict, notes, goalPace: goalSeconds / T.miles, predicted: predicted.seconds };
 }

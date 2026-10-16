@@ -60,10 +60,12 @@ function context(plan) {
     peak_long_distance: plan.type.peakLong,
     peak_long_runs_scheduled: plan.twenties,
     peak_long_runs_already_done_last_6_months: plan.past.flatMap((w) => w.days).filter((d) => (d.miles || 0) >= plan.type.peakLong * 0.95).length,
+    // one line per week, not per day: the model only needs the shape, and a big
+    // context is what makes the reply run out of room mid-JSON
     weeks: plan.weeks.map((w) => ({
       week: w.week, monday: w.monday, phase: w.phase,
       planned_miles: w.plannedMiles, long_run: w.longMiles,
-      days: w.days.map((d) => ({ date: d.date, dow: d.dow, session: d.title, miles: d.miles ?? null })),
+      sessions: w.days.filter((d) => d.miles).map((d) => `${d.dow} ${d.title} ${d.miles}`).join(", "),
     })),
     current_adjustments: plan.applied,
     refused_adjustments: plan.rejected,
@@ -97,7 +99,7 @@ export async function handler(event) {
     const convo = history.slice(-6).map((h) => `${h.role === "user" ? "Them" : "You"}: ${h.text}`).join("\n");
     const out = await chatJson(SYSTEM,
       `The plan right now:\n${JSON.stringify(context(plan))}\n\n${convo ? `Earlier:\n${convo}\n\n` : ""}Them: ${message}`,
-      { temperature: 0.2, maxTokens: 900 });
+      { temperature: 0.2, maxTokens: 1400 });
 
     const adjustments = Array.isArray(out?.adjustments) ? out.adjustments.filter((a) => a && ADJUST_OPS[a.op]) : [];
     return json(200, { reply: out?.reply || "Done.", adjustments });

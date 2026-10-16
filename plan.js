@@ -442,13 +442,15 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
   // deep fatigue right now means the first weeks start below where you have been
   if (form.freshness != null && form.freshness <= -15) from *= 0.85;
   const want = form.need.peak;
+  /* The ramp keeps climbing underneath; a cutback week dips below it rather than
+     resetting it. Getting this wrong keeps the plan permanently small, which in turn
+     keeps the long runs small, because a long run may not dominate its week. */
   const volumes = [];
-  let v = from;
+  let base = from;
   for (let i = 0; i < buildWeeks; i++) {
+    base = Math.min(want, base * 1.08);
     const cutback = i > 0 && (i + 1) % 4 === 0;
-    const step = Math.min(want, v * 1.08);
-    v = cutback ? v * 0.8 : step;
-    volumes.push(v);
+    volumes.push(cutback ? base * 0.8 : base);
   }
   const reachedPeak = Math.max(...volumes, from);
   // descending through the taper: the week before the race is the smallest
@@ -456,7 +458,10 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
   for (const f of taperShape) volumes.push(reachedPeak * f);
 
   // a long run should not be more than about 55% of the week it sits in
-  let ladder = ladderRaw.map((x, i) => (x == null ? null : Math.min(x, Math.max(6, Math.round((volumes[i] ?? from) * 0.55)))));
+  // Higdon runs a 20 inside a 40-mile week, so the long run may take a bigger share
+  // than I first allowed. Short-race training keeps the smaller share, where volume is the point.
+  const longShare = T.miles >= 13 ? 0.62 : 0.5;
+  let ladder = ladderRaw.map((x, i) => (x == null ? null : Math.min(x, Math.max(6, Math.round((volumes[i] ?? from) * longShare)))));
 
   /* Adjustments asked for in the chat. Each is checked before it lands; anything
      refused comes back with a reason so the chat can say why. */

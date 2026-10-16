@@ -28,7 +28,7 @@ async function call(path, body, { timeoutMs = 20000 } = {}) {
   try {
     const r = await fetch(`${API()}${path}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${env("GROQ_API_KEY")}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${KEY()}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: ctrl.signal,
     });
@@ -49,18 +49,57 @@ export async function chat(system, user, { temperature = 0.6, maxTokens = 400 } 
   return (j.choices?.[0]?.message?.content || "").trim();
 }
 
-/** Strict JSON back. Throws rather than returning something half-parsed. */
-export async function chatJson(system, user, { temperature = 0.1, maxTokens = 900 } = {}) {
-  const j = await call("/chat/completions", {
-    model: MODEL(),
-    temperature,
-    max_tokens: maxTokens,
-    response_format: { type: "json_object" },
+/* Pull the first complete JSON object out of a reply, even when it arrives wrapped in
+   prose or a code fence. Brace-matching rather than a regex, so nested objects survive. */
+export function extractJson(text) {
+  if (!text) return null;
+  const cleaned = String(text).replace(/```(?:json)?/gi, "");
+  const start = cleaned.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < cleaned.length; i++) {
+    const c = cleaned[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}") { depth--; if (!depth) { try { return JSON.parse(cleaned.slice(start, i + 1)); } catch { return null; } } }
+  }
+  return null;
+}
+
+/** JSON back. Tries strict mode first, then falls back to asking plainly and extracting,
+    because strict mode on some models fails outright rather than degrading. */
+export async function chatJson(system, user, { temperature = 0.1, maxTokens = 2000 } = {}) {
+  const body = {
+    model: MODEL(), temperature, max_tokens: maxTokens,
     messages: [{ role: "system", content: system }, { role: "user", content: user }],
-  });
-  const text = j.choices?.[0]?.message?.content || "";
-  try { return JSON.parse(text); }
-  catch { throw new Error(`Model did not return JSON: ${text.slice(0, 160)}`); }
+  };
+  try {
+    const j = await call("/chat/completions", { ...body, response_format: { type: "json_object" } });
+    const text = j.choices?.[0]?.message?.content || "";
+    const parsed = extractJson(text);
+    if (parsed) return parsed;
+    if (j.choices?.[0]?.finish_reason === "length") throw new Error("the reply was cut off before the JSON closed");
+    throw new Error(`no JSON in the reply: ${text.slice(0, 120)}`);
+  } catch (e) {
+    console.warn("chatJson: strict mode failed —", e?.message || e, "· retrying without it");
+    const j = await call("/chat/completions", {
+      ...body,
+      messages: [
+        { role: "system", content: `${system}\n\nReply with the JSON object only. No explanation, no code fence, nothing before or after it.` },
+        { role: "user", content: user },
+      ],
+    });
+    const text = j.choices?.[0]?.message?.content || "";
+    const parsed = extractJson(text);
+    if (parsed) return parsed;
+    throw new Error(`Model did not return usable JSON: ${text.slice(0, 160)}`);
+  }
 }
 
 /** Whisper. Takes a base64 audio blob from the browser. */
@@ -74,7 +113,7 @@ export async function transcribe(base64, mime = "audio/webm") {
   form.append("language", "en");
   const r = await fetch(`${API()}/audio/transcriptions`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${env("GROQ_API_KEY")}` },
+    headers: { Authorization: `Bearer ${KEY()}` },
     body: form,
   });
   const j = await r.json().catch(() => ({}));

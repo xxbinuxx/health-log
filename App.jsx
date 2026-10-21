@@ -4,7 +4,7 @@ import { store } from "./storage";
 import { supabase } from "./supabase";
 import { parseNotes } from "./notesImport";
 import { parseRocketMoney, resolveBuckets, spendByDay, SPEND_BUCKETS, DEFAULT_SPEND_SETTINGS } from "./spendImport";
-import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType } from "./plan";
+import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType, bestFromRaces, parseTime } from "./plan";
 import {
   pad, KM_PER_MI, toUnit, fromUnit, round, clamp, avg, sum,
   toDayKey, fromDayKey, addDays, mondayOf, dayKeyFor, lastNDays,
@@ -22,7 +22,7 @@ import {
 
 const KEYS = {
   doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions",
-  lifts: "hl2:lifts", days: "hl2:days", spend: "hl2:spend", settings: "hl2:settings",
+  lifts: "hl2:lifts", days: "hl2:days", spend: "hl2:spend", plan: "hl2:plan", settings: "hl2:settings",
 };
 
 /* ================================================================== */
@@ -42,6 +42,7 @@ const DEFAULT_SETTINGS = {
   theme: "light",
   peerSocialMax: 150,
   planStart: null,
+  races: [],
   planAdjust: [],
   planSwaps: [],
   priorRace: { time: "", distanceMi: 26.2, date: "" },
@@ -519,6 +520,7 @@ const CSS = `
 .hl .cell[draggable="true"]:active{cursor:grabbing;}
 .hl .cell.dragging{opacity:.45;border-style:dashed;}
 .hl .cell.moved{border-color:var(--navy);}
+.hl .cell.raceday{outline:2px solid var(--alert);outline-offset:-2px;background:color-mix(in srgb, var(--alert) 8%, transparent);}
 .hl .cell.past{background:color-mix(in srgb, var(--paper) 60%, transparent);}
 .hl tr.pastweek td{opacity:.85;}
 @media(max-width:700px){.hl .cell{height:52px;padding:3px 2px;} .hl .cell .dsub{display:none;}}
@@ -2184,11 +2186,6 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
   const stepsArr = span.map((k) => daily.get(k).steps).filter((x) => x != null);
   const weeks = Math.max(1, range / 7);
 
-  const raceDate = settings.race.date ? fromDayKey(settings.race.date) : null;
-  const daysOut = raceDate ? Math.ceil((raceDate - new Date()) / 864e5) : null;
-  const goalSec = parseGoalTime(settings.race.goalTime);
-  const setRace = (patch) => setSettings({ ...settings, race: { ...settings.race, ...patch } });
-
   const recent = [...sessions].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.ts - a.ts)).slice(0, 20);
 
   return (
@@ -2291,16 +2288,19 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
         <div className="panel">
           <h2>Race</h2>
           <div className="body">
-            <div className="row">
-              <label className="f" style={{ flex: 1, minWidth: 140 }}>Name<input value={settings.race.name} placeholder="Brooklyn Half" onChange={(e) => setRace({ name: e.target.value })} /></label>
-              <label className="f" style={{ width: 150 }}>Date<input type="date" value={settings.race.date} onChange={(e) => setRace({ date: e.target.value })} /></label>
-              <label className="f" style={{ width: 110 }}>Goal time<input value={settings.race.goalTime} placeholder="1:45:00" onChange={(e) => setRace({ goalTime: e.target.value })} /></label>
-            </div>
-            <p className="note" style={{ marginTop: 10 }}>
-              {daysOut != null && daysOut >= 0
-                ? <>{daysOut} days out, {Math.floor(daysOut / 7)} full weeks.{goalSec && avgPace ? ` Goal pace ${secsToClock(goalSec / 13.1)}/${u} if it's a half; your recent average is ${secsToClock(avgPace)}/${u}.` : ""}</>
-                : "Set a date and the countdown shows in the header."}
-            </p>
+            {(() => {
+              const today = toDayKey(new Date());
+              const next = (settings.races || []).filter((r) => r.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+              if (!next) return <p className="empty">No upcoming race. Add one on the Calendar tab and the countdown appears here.</p>;
+              const days = Math.ceil((fromDayKey(next.date) - new Date()) / 864e5);
+              return (
+                <p className="note" style={{ color: "var(--ink)" }}>
+                  <b>{next.name || raceType(next.kind).name}</b> in {days} day{days === 1 ? "" : "s"} ({fmtDayLabel(next.date)})
+                  {next.goalTime ? <> · goal {next.goalTime}{avgPace ? <>, which is {secsToClock(parseGoalTime(next.goalTime) / (Number(next.distanceMi) || raceType(next.kind).miles))}/{u} against your recent {secsToClock(avgPace)}/{u}</> : null}</> : null}
+                  <br />Races and the training plan live on the Calendar tab.
+                </p>
+              );
+            })()}
           </div>
         </div>
         <div className="panel">
@@ -2331,9 +2331,9 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
   );
 }
 
-function CalendarWrap({ doses, sleep, sessions, days, settings, setSettings }) {
+function CalendarWrap({ doses, sleep, sessions, days, settings, setSettings, planned, setPlanned }) {
   const daily = useDaily({ doses, sleep, sessions, days, settings });
-  return <Calendar daily={daily} settings={settings} setSettings={setSettings} />;
+  return <Calendar daily={daily} settings={settings} setSettings={setSettings} planned={planned} setPlanned={setPlanned} />;
 }
 
 function SpendDashWrap({ doses, sleep, sessions, days, spend, setSpend, settings, setSettings, range }) {
@@ -2595,15 +2595,189 @@ function SpendImport({ spend, setSpend, settings }) {
   );
 }
 
-/* A chat that can reshape the plan. It proposes changes; plan.js decides whether they
-   are allowed, and says why when they are not. */
-function PlanChat({ plan, settings, setSettings }) {
+/* Every race, past and future. Past ones with a result become the thing that predicts
+   your next one; the soonest future one is what the plan is built toward. */
+function Races({ settings, setSettings, daily, onPickTarget }) {
+  const today = toDayKey(new Date());
+  const races = settings.races || [];
+  const [draft, setDraft] = useState(null);
+
+  const save = (r) => {
+    const rows = r.id ? races.map((x) => (x.id === r.id ? r : x)) : [...races, { ...r, id: uid() }];
+    setSettings({ ...settings, races: rows.sort((a, b) => (a.date < b.date ? 1 : -1)) });
+    setDraft(null);
+  };
+  const remove = (id) => setSettings({ ...settings, races: races.filter((r) => r.id !== id) });
+
+  const past = races.filter((r) => r.date <= today);
+  const future = races.filter((r) => r.date > today).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const target = future[0] || null;
+  const best = bestFromRaces(races, raceType(target?.kind).miles, today);
+
+  /* Anything in the log that looks like a race, offered once so you do not retype it. */
+  const found = useMemo(() => {
+    const known = new Set(races.map((r) => r.date));
+    const pat = /\b(marathon|half|10 ?k|5 ?k|race|championship|turkey trot|relay|classic|invitational)\b/i;
+    const out = [];
+    for (const [date, x] of daily.byDay) {
+      if (known.has(date) || date > today) continue;
+      for (const sess of x.sessions) {
+        if (sess.kind !== "run" || !sess.distanceKm) continue;
+        const isRace = sess.type === "race" || pat.test(sess.name || "");
+        if (!isRace) continue;
+        const mi = toUnit(sess.distanceKm, settings.distanceUnit);
+        if (mi < 3) continue;
+        const sec = sess.movingSec || (sess.paceSecPerKm ? sess.paceSecPerKm * sess.distanceKm : null);
+        out.push({ date, name: (sess.name || "Race").slice(0, 44), distanceMi: round(mi, 2),
+          resultTime: sec ? secsToClock(sec) : "", kind: guessKind(mi) });
+      }
+    }
+    return out.sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 8);
+  }, [daily, races, settings.distanceUnit, today]);
+
+  const Row = ({ r }) => {
+    const sec = parseTime(r.resultTime), goal = parseTime(r.goalTime);
+    const mi = Number(r.distanceMi) || raceType(r.kind).miles;
+    return (
+      <tr>
+        <td style={{ whiteSpace: "nowrap" }}>{fmtShort(r.date)}{r.date > today && <span className="pill" style={{ marginLeft: 6 }}>upcoming</span>}</td>
+        <td>{r.name || raceType(r.kind).name}</td>
+        <td className="num">{round(mi, 1)}</td>
+        <td className="num">{r.goalTime || ""}</td>
+        <td className="num" style={{ color: sec && goal ? (sec <= goal ? HEX.run : HEX.alert) : undefined }}>
+          {r.resultTime || (r.date > today ? "—" : "")}
+        </td>
+        <td className="num" style={{ color: "var(--faint)" }}>{sec ? `${secsToClock(sec / mi)}/${settings.distanceUnit}` : ""}</td>
+        <td style={{ whiteSpace: "nowrap" }}>
+          <button className="del" onClick={() => setDraft({ ...r })} title="Edit">✎</button>
+          <button className="del" onClick={() => remove(r.id)} title="Delete">×</button>
+        </td>
+      </tr>
+    );
+  };
+
+  return (
+    <div className="panel">
+      <h2>Races <span className="hint">{target ? `next: ${target.name || raceType(target.kind).name} on ${fmtShort(target.date)}` : "nothing upcoming"}</span></h2>
+      <div className="body">
+        {races.length > 0 && (
+          <table style={{ marginBottom: 12 }}>
+            <thead><tr><th>Date</th><th>Race</th><th className="num">{settings.distanceUnit}</th><th className="num">Goal</th><th className="num">Result</th><th className="num">Pace</th><th /></tr></thead>
+            <tbody>
+              {future.map((r) => <Row key={r.id} r={r} />)}
+              {past.map((r) => <Row key={r.id} r={r} />)}
+            </tbody>
+          </table>
+        )}
+
+        {best && target && (
+          <p className="note" style={{ marginBottom: 10 }}>
+            Your best predictor is <b>{best.name || "a past race"}</b> ({best.resultTime} over {round(best.miles, 1)} {settings.distanceUnit},
+            {" "}{best.months} months ago) → equivalent <b>{secsToClock(best.predicted)}</b> for {raceType(target.kind).name.toLowerCase()}.
+            {best.considered?.some((c) => c.tooShort) && " Shorter races are listed but not used to predict — they flatter anyone who has not done the long runs."}
+          </p>
+        )}
+
+        {found.length > 0 && (
+          <div style={{ marginBottom: 10 }}>
+            <p className="note" style={{ marginBottom: 6 }}>Found in your log, not yet saved as races:</p>
+            <div className="chips">
+              {found.map((f) => (
+                <button key={f.date} className="tchip" onClick={() => setDraft(f)}>
+                  {fmtShort(f.date)} · {f.name.slice(0, 22)} · {f.distanceMi} {settings.distanceUnit}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!draft ? (
+          <button className="solid" onClick={() => setDraft({ date: "", name: "", kind: "marathon", distanceMi: 26.2, goalTime: "", resultTime: "" })}>
+            Add a race
+          </button>
+        ) : (
+          <>
+            <div className="divline" />
+            <div className="row">
+              <label className="f" style={{ width: 146 }}>Date<input type="date" value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} /></label>
+              <label className="f" style={{ flex: 1, minWidth: 130 }}>Name<input value={draft.name} placeholder="CIM" onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label>
+              <label className="f" style={{ width: 112 }}>Distance
+                <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value, distanceMi: RACE_TYPES[e.target.value].miles })}>
+                  {Object.entries(RACE_TYPES).map(([k, t]) => <option key={k} value={k}>{t.name}</option>)}
+                </select>
+              </label>
+              <label className="f" style={{ width: 84 }}>Exact {settings.distanceUnit}
+                <input value={draft.distanceMi} inputMode="decimal" onChange={(e) => setDraft({ ...draft, distanceMi: Number(e.target.value) || 0 })} />
+              </label>
+            </div>
+            <div className="row" style={{ marginTop: 10 }}>
+              <label className="f" style={{ width: 112 }}>Goal time<input value={draft.goalTime || ""} placeholder="3:30:00" onChange={(e) => setDraft({ ...draft, goalTime: e.target.value })} /></label>
+              <label className="f" style={{ width: 112 }}>Result<input value={draft.resultTime || ""} placeholder="3:20:38" onChange={(e) => setDraft({ ...draft, resultTime: e.target.value })} /></label>
+              <label className="f" style={{ flex: 1, minWidth: 140 }}>Notes<input value={draft.notes || ""} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} /></label>
+            </div>
+            <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+              <button className="solid" onClick={() => draft.date && save(draft)} disabled={!draft.date}>Save</button>
+              <button className="ghost" onClick={() => setDraft(null)}>Cancel</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const guessKind = (mi) =>
+  mi >= 40 ? "50mi" : mi >= 28 ? "50k" : mi >= 20 ? "marathon" : mi >= 11 ? "half" : mi >= 5 ? "10k" : mi >= 2.5 ? "5k" : "mile";
+
+/* A chat that edits the stored plan. It proposes day-level changes; the code applies
+   them to the records and refuses anything that breaks the shape of a taper. */
+function PlanChat({ settings, setSettings, planned, setPlanned }) {
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const boxRef = useRef(null);
+  const today = toDayKey(new Date());
 
-  const adjustments = settings.planAdjust || [];
+  const apply = (ops) => {
+    const rows = [...(planned || [])];
+    const at = (d) => rows.findIndex((r) => r.date === d);
+    const done = [], refused = [];
+    const raceDate = settings.race?.date;
+    for (const op of ops) {
+      if (op.date && op.date < today) { refused.push(`${op.date} has already happened`); continue; }
+      if (op.date === raceDate || op.to === raceDate || op.from === raceDate) { refused.push("race day cannot be changed"); continue; }
+      if (op.op === "setDay") {
+        const i = at(op.date);
+        const row = { date: op.date, kind: op.kind || "run", title: op.title || "Run",
+          miles: op.miles ?? null, pace: null, note: op.note || "", edited: true };
+        if (i >= 0) rows[i] = { ...rows[i], ...row }; else rows.push(row);
+        done.push(`${op.date}: ${row.title}${row.miles ? ` ${row.miles}` : ""}`);
+      } else if (op.op === "moveDay") {
+        const a = at(op.from), b = at(op.to);
+        if (a < 0) { refused.push(`nothing planned on ${op.from}`); continue; }
+        const body = (r) => ({ kind: r.kind, title: r.title, miles: r.miles, pace: r.pace, note: r.note });
+        const A = body(rows[a]);
+        const B = b >= 0 ? body(rows[b]) : { kind: "rest", title: "Rest", miles: null, pace: null, note: "" };
+        rows[a] = { ...rows[a], ...B, edited: true };
+        if (b >= 0) rows[b] = { ...rows[b], ...A, edited: true };
+        else rows.push({ date: op.to, ...A, edited: true });
+        done.push(`swapped ${op.from} and ${op.to}`);
+      } else if (op.op === "scaleWeek") {
+        const mon = op.monday;
+        const f = Number(op.factor);
+        if (!(f > 0.4 && f < 1.8)) { refused.push("that is too big a change to a week"); continue; }
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].date >= mon && rows[i].date < addDays(mon, 7) && rows[i].date >= today && rows[i].miles) {
+            rows[i] = { ...rows[i], miles: round(rows[i].miles * f, 1), edited: true };
+          }
+        }
+        done.push(`week of ${mon} scaled by ${f}`);
+      } else refused.push(`"${op.op}" is not something I can do`);
+    }
+    if (done.length) setPlanned(rows);
+    return { done, refused };
+  };
+
   const send = async (override) => {
     const message = (override ?? text).trim();
     if (!message || busy) return;
@@ -2612,61 +2786,37 @@ function PlanChat({ plan, settings, setSettings }) {
     setMsgs(history);
     try {
       const j = await callFn("/.netlify/functions/plan-chat", {
-        method: "POST", body: { message, history: msgs.slice(-6) },
+        method: "POST",
+        body: { message, history: msgs.slice(-6), plan: (planned || []).filter((d) => d.date >= today).slice(0, 80) },
       });
-      if (j.adjustments?.length) {
-        setSettings({ ...settings, planAdjust: [...adjustments, ...j.adjustments] });
-      }
-      setMsgs([...history, { role: "coach", text: j.reply, adjustments: j.adjustments || [] }]);
+      const res = j.operations?.length ? apply(j.operations) : { done: [], refused: [] };
+      setMsgs([...history, { role: "coach", text: j.reply, done: res.done, refused: res.refused }]);
     } catch (e) {
       setMsgs([...history, { role: "coach", text: String(e.message || e), error: true }]);
-    } finally {
-      setBusy(false);
-      setTimeout(() => boxRef.current?.scrollTo({ top: 1e6 }), 50);
-    }
+    } finally { setBusy(false); setTimeout(() => boxRef.current?.scrollTo({ top: 1e6 }), 50); }
   };
 
-  const examples = [
-    "Add two more 20 milers",
-    "Move the long run to Saturday",
-    "I can only run four days a week",
-    "Make week 3 easier, I'm travelling",
-  ];
+  const examples = ["Add a 20 miler two weeks out", "Move Sunday's long run to Saturday", "Make next week 20% easier", "I'm travelling Thursday to Sunday"];
 
   return (
     <div className="panel">
-      <h2>Ask the plan to change
-        <span className="hint">
-          {adjustments.length ? `${adjustments.length} change${adjustments.length === 1 ? "" : "s"} applied` : "it keeps the taper and the build intact"}
-          {adjustments.length ? <> · <button className="del" onClick={() => setSettings({ ...settings, planAdjust: [] })} style={{ fontSize: 12 }}>reset all</button></> : null}
-        </span>
-      </h2>
+      <h2>Tell it what you need <span className="hint">it edits the days; you can undo anything by editing them back</span></h2>
       <div className="body">
         {msgs.length > 0 && (
           <div ref={boxRef} className="chatbox">
             {msgs.map((m, i) => (
               <div key={i} className={`bubble ${m.role}${m.error ? " err" : ""}`}>
                 {m.text}
-                {m.adjustments?.length > 0 && (
-                  <div className="note" style={{ marginTop: 6, color: "var(--faint)" }}>
-                    {m.adjustments.map((a, n) => <div key={n}>· {describe(a)}</div>)}
-                  </div>
-                )}
+                {m.done?.length > 0 && <div className="note" style={{ marginTop: 6, color: "var(--faint)" }}>{m.done.map((t, n) => <div key={n}>· {t}</div>)}</div>}
+                {m.refused?.length > 0 && <div className="note" style={{ marginTop: 6, color: "var(--alert)" }}>{m.refused.map((t, n) => <div key={n}>· {t}</div>)}</div>}
               </div>
             ))}
             {busy && <div className="bubble coach" style={{ opacity: 0.6 }}>Thinking…</div>}
           </div>
         )}
-
-        {plan.rejected?.length > 0 && (
-          <p className="note flag" style={{ marginBottom: 8 }}>
-            {plan.rejected.length} change{plan.rejected.length === 1 ? " was" : "s were"} refused: {plan.rejected.map((r) => r.why).join("; ")}.
-          </p>
-        )}
-
         <div className="row">
           <label className="f" style={{ flex: 1, minWidth: 200 }}>
-            <input value={text} placeholder="Add a 20 in week 2 and drop week 4" disabled={busy}
+            <input value={text} placeholder="Add a 20 miler on the 15th" disabled={busy}
                    onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
           </label>
           <button className="solid" onClick={() => send()} disabled={busy || !text.trim()}>Send</button>
@@ -2676,257 +2826,208 @@ function PlanChat({ plan, settings, setSettings }) {
             {examples.map((x) => <button key={x} className="tchip" onClick={() => send(x)}>{x}</button>)}
           </div>
         )}
-        <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
-          It can move mileage and days around, but it cannot break the shape: no long run more than four beyond
-          the one before, no week more than about 10% up on the last, and nothing rises during the taper.
-        </p>
       </div>
     </div>
   );
 }
 
-const describe = (a) => ({
-  setLong: `week ${a.week} long run → ${a.miles}`,
-  setWeekVolume: `week ${a.week} total → ${a.miles}`,
-  move: `swap ${a.from} and ${a.to}`,
-  setIntervalMiles: `intervals → ${a.miles} miles`,
-  setIntervalDay: `interval day → ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][a.dow]}`,
-  setRestDay: `rest day → ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][a.dow]}`,
-  setLongRunDay: `long run day → ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][a.dow]}`,
-  setTwentyTarget: `peak long runs → ${a.count}`,
-}[a.op] || a.op);
+/* The training calendar.
 
-/* The training calendar. Rebuilt from the log every render, so what you actually did
-   changes what comes next. Nothing here is generated by a model — it is all arithmetic,
-   shaped like Higdon's Intermediate 2 and the BAA's level-four template. */
-function Calendar({ daily, settings, setSettings }) {
+   The plan is DATA, not a formula. "Generate" writes a session record for every day
+   between now and the race; after that nothing recomputes behind you — you edit days,
+   drag them, or ask the chat to change them, and what you actually ran is layered on
+   top from the log. History reaches back as far as you have run. */
+function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
   const today = toDayKey(new Date());
-  const race = settings.race || {};
+  // the soonest future race in the list is what the plan is built toward
+  const races = settings.races || [];
+  const target = races.filter((r) => r.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1))[0] || null;
+  const race = target ? { name: target.name, date: target.date, kind: target.kind, goalTime: target.goalTime } : {};
   const goalSec = parseGoalTime(race.goalTime);
-  const ready = race.date && goalSec && race.date >= today;
+  const ready = !!(race.date && goalSec && race.date >= today);
+  const raceDates = useMemo(() => new Map(races.map((r) => [r.date, r])), [races]);
   const [pick, setPick] = useState(null);
   const [drag, setDrag] = useState(null);
-  const [showPast, setShowPast] = useState(false);
+  const [edit, setEdit] = useState(null);
+  const [weeksBack, setWeeksBack] = useState(8);
+  const u = settings.distanceUnit;
 
-  const swap = (from, to) => {
-    if (!from || !to || from === to) return;
-    setSettings({ ...settings, planSwaps: [...(settings.planSwaps || []), [from, to]] });
-  };
-  const clearSwaps = () => setSettings({ ...settings, planSwaps: [] });
-
-  const plan = useMemo(() => {
-    if (!ready) return null;
-    try { return buildPlan({ todayKey: today, raceDate: race.date, raceName: race.name, raceKind: race.kind, goalSeconds: goalSec, daily, settings }); }
-    catch (e) { console.error("plan:", e); return null; }
-  }, [ready, race.date, race.name, race.kind, goalSec, daily, settings, today]);
-
-  const setRace = (patch) => setSettings({ ...settings, race: { ...settings.race, ...patch } });
-  const setPrior = (patch) => setSettings({ ...settings, priorRace: { distanceMi: 26.2, ...(settings.priorRace || {}), ...patch } });
-  const setPrefs = (patch) => setSettings({ ...settings, planPrefs: { ...DEFAULT_PREFS, ...(settings.planPrefs || {}), ...patch } });
   const prefs = { ...DEFAULT_PREFS, ...(settings.planPrefs || {}) };
+  const setPrefs = (patch) => setSettings({ ...settings, planPrefs: { ...prefs, ...patch } });
+
+  const byDate = useMemo(() => new Map((planned || []).map((d) => [d.date, d])), [planned]);
+  const hasPlan = (planned || []).length > 0;
+
+  /* ---- generating: run the arithmetic once, then store what it produced ---- */
+  const generate = (replace) => {
+    try {
+      const p = buildPlan({ todayKey: today, raceDate: race.date, raceName: race.name,
+        raceKind: race.kind, goalSeconds: goalSec, daily, settings });
+      const rows = p.weeks.flatMap((w) => w.days.map((d) => ({
+        date: d.date, kind: d.kind, title: d.title,
+        miles: d.miles ?? null, pace: d.pace ?? null, note: d.note || "",
+      })));
+      // keep anything you have already edited unless you asked to replace it
+      const keep = replace ? new Map() : new Map((planned || []).filter((d) => d.edited).map((d) => [d.date, d]));
+      setPlanned(rows.map((r) => keep.get(r.date) || r).concat(
+        [...keep.values()].filter((d) => !rows.some((r) => r.date === d.date))));
+    } catch (e) { console.error("generate:", e); }
+  };
+
+  const updateDay = (date, patch) =>
+    setPlanned((planned || []).map((d) => (d.date === date ? { ...d, ...patch, edited: true } : d)));
+  const addDay = (row) => setPlanned([...(planned || []).filter((d) => d.date !== row.date), { ...row, edited: true }]);
+  const swapDays = (a, b) => {
+    if (!a || !b || a === b) return;
+    const A = byDate.get(a), B = byDate.get(b);
+    const body = (x) => (x ? { kind: x.kind, title: x.title, miles: x.miles, pace: x.pace, note: x.note } : { kind: "rest", title: "Rest", miles: null, pace: null, note: "" });
+    setPlanned((planned || []).map((d) =>
+      d.date === a ? { ...d, ...body(B), edited: true }
+      : d.date === b ? { ...d, ...body(A), edited: true } : d));
+  };
+
+  /* ---- the weeks shown: history behind, plan ahead ---- */
+  const allDates = [...daily.byDay.keys()].sort();
+  const firstLogged = allDates[0] || today;
+  const planDates = (planned || []).map((d) => d.date).sort();
+  const lastDate = race.date || planDates[planDates.length - 1] || today;
+  const startFrom = (() => {
+    const wanted = addDays(mondayOf(today), -7 * weeksBack);
+    return wanted < firstLogged ? mondayOf(firstLogged) : wanted;
+  })();
+
+  const grid = useMemo(() => {
+    const out = [];
+    for (let monday = mondayOf(startFrom); monday <= lastDate; monday = addDays(monday, 7)) {
+      const days = [];
+      for (let i = 0; i < 7; i++) {
+        const date = addDays(monday, i);
+        if (date > lastDate) break;
+        const x = daily.get(date);
+        const plan = byDate.get(date) || null;
+        const raceHere = raceDates.get(date) || null;
+        const ranMi = round(toUnit(x.runKm, u), 1);
+        days.push({
+          date, dow: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][fromDayKey(date).getDay()],
+          plan, race: raceHere, past: date < today, isToday: date === today,
+          ran: ranMi || null, lifted: x.hasLift,
+          pace: x.paceSecKm ? (u === "mi" ? x.paceSecKm * 1.609344 : x.paceSecKm) : null,
+          sleep: x.sleep?.score ?? null, rhr: x.sleep?.restingHr ?? null,
+          drinks: round(x.alc, 1) || 0, thc: round(x.thcMg, 1) || 0, note: x.note || "",
+        });
+      }
+      const plannedMi = round(sum(days.map((d) => d.plan?.miles || 0)), 1);
+      const ranMi = round(sum(days.map((d) => d.ran || 0)), 1);
+      out.push({ monday, days, plannedMi, ranMi,
+        longPlanned: Math.max(0, ...days.map((d) => d.plan?.miles || 0)) || null,
+        longRan: Math.max(0, ...days.map((d) => d.ran || 0)) || null });
+    }
+    return out;
+  }, [startFrom, lastDate, daily, byDate, u, today]);
 
   const Setup = (
     <div className="panel">
-      <h2>The race <span className="hint">everything below is built from these</span></h2>
+      <h2>Plan settings <span className="hint">{target ? `building toward ${target.name || raceType(target.kind).name}` : "add an upcoming race above first"}</span></h2>
       <div className="body">
         <div className="row">
-          <label className="f" style={{ flex: 1, minWidth: 130 }}>Race<input value={race.name || ""} placeholder="CIM" onChange={(e) => setRace({ name: e.target.value })} /></label>
-          <label className="f" style={{ width: 150 }}>Date<input type="date" value={race.date || ""} onChange={(e) => setRace({ date: e.target.value })} /></label>
-          <label className="f" style={{ width: 118 }}>Distance
-            <select value={race.kind || "marathon"} onChange={(e) => setRace({ kind: e.target.value })}>
-              {Object.entries(RACE_TYPES).map(([k, t]) => <option key={k} value={k}>{t.name}</option>)}
-            </select>
+          <label className="f" style={{ width: 120 }}>Intervals ({u})
+            <input value={prefs.intervalMiles} inputMode="decimal" onChange={(e) => setPrefs({ intervalMiles: Number(e.target.value) || 4 })} />
           </label>
-          <label className="f" style={{ width: 116 }}>Target time<input value={race.goalTime || ""} placeholder={raceType(race.kind).miles > 20 ? "3:15:00" : "19:30"} onChange={(e) => setRace({ goalTime: e.target.value })} /></label>
-        </div>
-        <div className="row" style={{ marginTop: 10 }}>
-          <label className="f" style={{ width: 116 }}>Previous best<input value={settings.priorRace?.time || ""} placeholder="3:20:00" onChange={(e) => setPrior({ time: e.target.value })} /></label>
-          <label className="f" style={{ width: 104 }}>over
-            <select value={settings.priorRace?.distanceMi ?? 26.2} onChange={(e) => setPrior({ distanceMi: Number(e.target.value) })}>
-              {Object.values(RACE_TYPES).map((t) => <option key={t.name} value={t.miles}>{t.name}</option>)}
-            </select>
-          </label>
-          <label className="f" style={{ width: 150 }}>When<input type="date" value={settings.priorRace?.date || ""} onChange={(e) => setPrior({ date: e.target.value })} /></label>
-          <label className="f" style={{ width: 128 }}>Long run day
-            <select value={prefs.longRunDays[0]} onChange={(e) => {
-              const d = Number(e.target.value);
-              setPrefs({ longRunDays: [d, ...[0, 6, 5].filter((x) => x !== d)] });
-            }}>
+          <label className="f" style={{ width: 130 }}>Long run day
+            <select value={prefs.longRunDays[0]} onChange={(e) => { const d = Number(e.target.value); setPrefs({ longRunDays: [d, ...[0, 6, 5].filter((x) => x !== d)] }); }}>
               <option value={0}>Sunday</option><option value={6}>Saturday</option><option value={5}>Friday</option>
             </select>
           </label>
-          <label className="f" style={{ width: 130 }}>Big long runs wanted
-            <input value={prefs.twentyTarget ?? ""} inputMode="numeric" placeholder={String(raceType(race.kind).bigTarget)}
-                   onChange={(e) => setPrefs({ twentyTarget: e.target.value === "" ? null : Math.max(0, Math.min(5, Number(e.target.value) || 0)) })} />
-          </label>
         </div>
-        <p className="note" style={{ marginTop: 8 }}>
-          Intervals stay on Tuesday. A previous race predicts far better than training runs do, so fill it in if you have one — any distance works, it gets converted.
-        </p>
+        <div className="row" style={{ marginTop: 10 }}>
+          <button className="solid" onClick={() => generate(false)} disabled={!ready}>
+            {hasPlan ? "Fill in missing days" : "Generate the plan"}
+          </button>
+          {hasPlan && (
+            <button className="ghost" onClick={() => { if (confirm("Replace every planned day, including your edits?")) generate(true); }}>
+              Start over
+            </button>
+          )}
+          {hasPlan && <span className="note">{(planned || []).filter((d) => d.edited).length} day{(planned || []).filter((d) => d.edited).length === 1 ? "" : "s"} edited by hand</span>}
+        </div>
+        {!ready && <p className="note flag" style={{ marginTop: 8 }}>Add an upcoming race with a goal time and the plan can be generated.</p>}
       </div>
     </div>
   );
 
-  if (!ready || !plan) {
-    return <>{Setup}<div className="panel"><div className="body"><p className="empty">
-      {race.date && race.date < today ? "That race date has passed." : "Add a date in the future and a goal time, and the calendar appears."}
-    </p></div></div></>;
-  }
-
-  const u = plan.unit;
-  const vColor = { comfortable: HEX.run, realistic: HEX.run, "a stretch": HEX.lift }[plan.goal.verdict] || HEX.alert;
-  const kindColor = (k) => (k === "race" ? HEX.alert : k === "lift" ? HEX.lift : k === "rest" ? HEX.rest : HEX.run);
-  const vMark = { done: "✓", short: "~", missed: "×", extra: "+", "ran instead": "~", "as planned": "" };
-
   return (
     <>
+      <Races settings={settings} setSettings={setSettings} daily={daily} />
       {Setup}
-
-      <div className="panel">
-        <h2>{plan.raceName || plan.type.name} · {(() => {
-            const d = Math.max(0, Math.round((fromDayKey(plan.raceDate) - fromDayKey(today)) / 864e5));
-            const wk = Math.floor(d / 7), rem = d % 7;
-            return d === 0 ? "race day" : wk >= 1 ? `${wk} week${wk === 1 ? "" : "s"}${rem ? ` ${rem}d` : ""} to go` : `${d} day${d === 1 ? "" : "s"} to go`;
-          })()}
-          <span className="hint">{plan.type.name} · {plan.weeks.length} weeks{plan.twenties ? ` · ${plan.twenties} × ${plan.type.peakLong} ${u}` : ""} · race pace {secsToClock(plan.paces.race)}/{u}</span>
-        </h2>
-        <div className="body">
-          <div className="grid4" style={{ gap: 12, marginBottom: 12 }}>
-            <Stat v={plan.goal.verdict} l="the goal, on what you have" color={vColor} />
-            <Stat v={plan.predicted.seconds ? secsToClock(plan.predicted.seconds) : null} l="equivalent today" color={HEX.rhr}
-                  sub={plan.predicted.basis === "prior race" ? "from your previous marathon" : "from your best long run"} />
-            <Stat v={plan.form.gap > 0 ? `+${plan.form.gap}` : `${plan.form.gap}`} l={`${u}/week still to add`}
-                  color={plan.form.gap <= 0 ? HEX.run : plan.form.gap <= 10 ? HEX.lift : HEX.alert}
-                  sub={`${plan.form.recentWeekly} now, this goal wants about ${plan.form.need.peak}`} />
-            <Stat v={round(sum(plan.weeks.map((w) => w.plannedMiles)), 0)} l={`${u} to race day`} color={HEX.lift}
-                  sub={`peak week ${Math.max(...plan.weeks.map((w) => w.plannedMiles))} ${u}`} />
-          </div>
-          {(() => {
-            const cur = plan.weeks[0];
-            if (!cur || cur.doneMiles == null) return null;
-            const pct = cur.plannedSoFar ? (cur.doneMiles / cur.plannedSoFar) * 100 : null;
-            return (
-              <p className="note" style={{ marginBottom: 10 }}>
-                <b>This week so far:</b> {cur.doneMiles} of {cur.plannedSoFar} {u} due by today
-                {pct != null ? ` (${Math.round(pct)}%)` : ""}, {cur.plannedMiles} {u} planned for the week.
-                {" "}Miss a session and next week is rebuilt smaller, not piled on top.
-              </p>
-            );
-          })()}
-          {plan.type.bigTarget > 0 && (() => {
-            const want = plan.prefs.twentyTarget ?? plan.type.bigTarget;
-            const doneBig = plan.past.flatMap((w) => w.days).filter((d) => (d.miles || 0) >= plan.type.peakLong * 0.95).length;
-            const plannedBig = plan.weeks.flatMap((w) => w.days).filter((d) => (d.miles || 0) >= plan.type.peakLong * 0.95 && d.kind !== "race").length;
-            return (
-              <p className="note" style={{ marginBottom: 10 }}>
-                <b>Runs at {plan.type.peakLong}+:</b> {doneBig} already done in the last six months, {plannedBig} scheduled before race day
-                {doneBig + plannedBig >= want ? ` — that covers the ${want} you want.` : `, ${want - doneBig - plannedBig} short of the ${want} you want.`}
-              </p>
-            );
-          })()}
-          {plan.goal.notes.length > 0 && (
-            <div className="note" style={{ paddingLeft: 10, borderLeft: `3px solid ${vColor}` }}>
-              {plan.goal.notes.map((n, i) => <div key={i} style={{ marginBottom: 3 }}>{n}</div>)}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="panel">
-        <h2>Where you are <span className="hint">read from everything you have logged, not assumed</span></h2>
-        <div className="body">
-          <div className="grid4" style={{ gap: 12, marginBottom: 12 }}>
-            <Stat v={plan.form.recentWeekly} l={`${u} / week, last 4 weeks`} color={HEX.run}
-                  sub={plan.form.trend == null ? "" : `${plan.form.trend > 0 ? "up" : "down"} ${Math.abs(plan.form.trend)}% on the month before`} />
-            <Stat v={plan.form.longest} l={`longest run, 90 days (${u})`} color={HEX.run}
-                  sub={plan.type.bigTarget ? `the plan wants ${plan.type.peakLong}` : ""} />
-            <Stat v={plan.form.stamina} l="Stamina" color={HEX.lift}
-                  sub={plan.form.freshness == null ? "" : plan.form.freshness >= 5 ? `rested (+${plan.form.freshness}%)`
-                    : plan.form.freshness > -15 ? `normal fatigue (${plan.form.freshness}%)` : `carrying fatigue (${plan.form.freshness}%)`} />
-            <Stat v={plan.form.consistency != null ? `${plan.form.consistency}%` : null} l="weeks run, last 8" color={HEX.sleep}
-                  sub={`needs about ${plan.form.need.peak} ${u}/week at peak`} />
-          </div>
-          {plan.history.length > 1 && (
-            <>
-              <Chart h={160}>
-                <ComposedChart data={[
-                  ...plan.history.map((h) => ({ label: fmtShort(h.monday), done: h.miles, long: h.longest })),
-                  ...plan.weeks.map((w) => ({ label: fmtShort(w.monday), plan: w.plannedMiles, long: w.longMiles ?? plan.type.miles })),
-                ]} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-                  <CartesianGrid stroke={HEX.grid} vertical={false} />
-                  <XAxis dataKey="label" tick={axisTick()} interval={Math.max(1, Math.ceil((plan.history.length + plan.weeks.length) / 10))} tickLine={false} axisLine={{ stroke: HEX.rule }} />
-                  <YAxis tick={axisTick()} tickLine={false} axisLine={false} />
-                  <Tooltip content={<Tip fmt={(p) => `${p.value} ${u}`} />} />
-                  <Bar dataKey="done" name="Ran" fill={HEX.rest} radius={[2, 2, 0, 0]} />
-                  <Bar dataKey="plan" name="Planned" fill={HEX.run} radius={[2, 2, 0, 0]} />
-                  <Line type="monotone" dataKey="long" name="Long run" stroke={HEX.sleep} strokeWidth={1.8} dot={false} connectNulls />
-                </ComposedChart>
-              </Chart>
-              <div className="legend">
-                <span><i style={{ background: HEX.rest }} />what you actually ran</span>
-                <span><i style={{ background: HEX.run }} />what the plan asks for</span>
-                <span><i style={{ background: HEX.sleep }} />long run</span>
-                <span>the plan starts where the history leaves off</span>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
-      <PlanChat plan={plan} settings={settings} setSettings={setSettings} />
+      {hasPlan && <PlanChat settings={settings} setSettings={setSettings} planned={planned} setPlanned={setPlanned} />}
 
       <div className="panel">
         <h2>Calendar
           <span className="seg" style={{ fontSize: 12 }}>
-            <button aria-pressed={!showPast} onClick={() => setShowPast(false)} style={{ padding: "3px 9px", fontSize: 12 }}>Ahead</button>
-            <button aria-pressed={showPast} onClick={() => setShowPast(true)} style={{ padding: "3px 9px", fontSize: 12 }}>Since {fmtShort(plan.past[0]?.monday || today)}</button>
+            {[4, 8, 26, 104].map((w) => (
+              <button key={w} aria-pressed={weeksBack === w} onClick={() => setWeeksBack(w)} style={{ padding: "3px 9px", fontSize: 12 }}>
+                {w >= 104 ? "all" : w >= 26 ? "6mo" : `${w}w`}
+              </button>
+            ))}
           </span>
         </h2>
         <div className="body" style={{ overflowX: "auto" }}>
           <p className="note" style={{ marginBottom: 8 }}>
-            Drag a session onto another day to swap them — useful when the long run has to move off Sunday.
-            {(settings.planSwaps || []).length > 0 && <> {(settings.planSwaps || []).length} move{(settings.planSwaps || []).length === 1 ? "" : "s"} applied. <button className="del" onClick={clearSwaps} style={{ fontSize: 12 }}>reset</button></>}
+            Grey is what you ran; coloured is what the plan asks for. Tap any day to edit it, or drag one onto another to swap.
           </p>
           <table className="cal">
-            <thead><tr><th style={{ width: 54 }}></th>{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => <th key={d}>{d}</th>)}<th className="num" style={{ width: 58 }}>{u}</th></tr></thead>
+            <thead><tr><th style={{ width: 58 }} />{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => <th key={d}>{d}</th>)}<th className="num" style={{ width: 62 }}>{u}</th></tr></thead>
             <tbody>
-              {[...(showPast ? plan.past.filter((w) => w.any) : []), ...plan.weeks].map((w, wi) => {
+              {grid.map((w) => {
                 const byDow = {};
                 for (const d of w.days) byDow[fromDayKey(d.date).getDay()] = d;
                 return (
-                  <tr key={w.monday} className={w.past ? "pastweek" : ""}>
-                    <td style={{ color: "var(--faint)", fontSize: 11 }}>
-                      {w.past ? fmtShort(w.monday) : `wk${w.week}`}
-                      <br /><span style={{ color: w.past ? "var(--faint)" : kindColor("run"), fontSize: 10 }}>{w.phase}</span>
-                    </td>
+                  <tr key={w.monday}>
+                    <td style={{ color: "var(--faint)", fontSize: 10.5 }}>{fmtShort(w.monday)}</td>
                     {[1, 2, 3, 4, 5, 6, 0].map((dow) => {
                       const d = byDow[dow];
                       if (!d) return <td key={dow} className="cell empty-cell" />;
-                      const m = w.marks?.[d.date];
-                      const isToday = d.date === today;
-                      const draggable = !w.past && d.date >= today && d.kind !== "race";
+                      const canDrag = !!d.plan && !d.past;
+                      const hit = d.plan?.miles && d.ran ? d.ran / d.plan.miles : null;
                       return (
                         <td key={dow}
-                            className={`cell${isToday ? " today" : ""}${w.past ? " past" : ""}${drag === d.date ? " dragging" : ""}${d.moved ? " moved" : ""}`}
-                            draggable={draggable}
-                            onDragStart={draggable ? (e) => { setDrag(d.date); e.dataTransfer.effectAllowed = "move"; } : undefined}
-                            onDragOver={draggable ? (e) => e.preventDefault() : undefined}
-                            onDrop={draggable ? (e) => { e.preventDefault(); swap(drag, d.date); setDrag(null); } : undefined}
+                            className={`cell${d.isToday ? " today" : ""}${d.past ? " past" : ""}${drag === d.date ? " dragging" : ""}${d.race ? " raceday" : ""}`}
+                            draggable={canDrag}
+                            onDragStart={canDrag ? () => setDrag(d.date) : undefined}
+                            onDragOver={canDrag ? (e) => e.preventDefault() : undefined}
+                            onDrop={canDrag ? (e) => { e.preventDefault(); swapDays(drag, d.date); setDrag(null); } : undefined}
                             onDragEnd={() => setDrag(null)}
-                            onClick={() => setPick({ ...d, week: w })}>
+                            onClick={() => { setPick(d); setEdit(null); }}>
                           <div className="dnum">{fromDayKey(d.date).getDate()}</div>
-                          <div className="dtitle" style={{ color: w.past ? (d.miles ? HEX.rest : "var(--faint)") : kindColor(d.kind) }}>
-                            {d.kind === "rest" ? (w.past ? "—" : "rest") : d.miles ? `${d.miles} ${u}` : "lift"}
-                          </div>
-                          <div className="dsub">{d.kind === "rest" ? "" : d.title.replace(" run", "").replace("Race-pace", "RP")}</div>
-                          {m && <div className={`dmark ${m.verdict.replace(/\s/g, "-")}`}>{vMark[m.verdict] ?? ""} {m.actualMiles > 0 ? `${m.actualMiles}` : ""}</div>}
-                          {w.past && d.miles >= plan.type.peakLong * 0.95 && <div className="dmark done">★</div>}
+                          {d.race && (
+                            <div className="dtitle" style={{ color: HEX.alert }}>
+                              🏁 {d.race.name ? d.race.name.slice(0, 10) : raceType(d.race.kind).name}
+                            </div>
+                          )}
+                          {d.race && (
+                            <div className="dsub" style={{ color: HEX.alert }}>
+                              {d.race.resultTime || d.race.goalTime || `${round(Number(d.race.distanceMi) || raceType(d.race.kind).miles, 1)} ${u}`}
+                            </div>
+                          )}
+                          {!d.race && d.plan && (
+                            <div className="dtitle" style={{ color: d.plan.kind === "race" ? HEX.alert : d.plan.kind === "lift" ? HEX.lift : d.plan.kind === "rest" ? HEX.rest : HEX.run }}>
+                              {d.plan.kind === "rest" ? "rest" : d.plan.miles ? `${d.plan.miles}` : "lift"}
+                              {d.plan.edited && <span style={{ color: "var(--navy)" }}>·</span>}
+                            </div>
+                          )}
+                          {!d.race && d.plan && <div className="dsub">{d.plan.kind === "rest" ? "" : d.plan.title.replace(" run", "").replace("Race-pace", "RP")}</div>}
+                          {(d.ran || d.lifted) && (
+                            <div className={`dmark ${hit == null ? "done" : hit >= 0.85 ? "done" : hit >= 0.5 ? "short" : "short"}`}>
+                              {d.ran ? `${d.ran}` : "lift"}{d.ran && d.lifted ? "+L" : ""}
+                            </div>
+                          )}
+                          {d.past && !d.ran && !d.lifted && d.plan && d.plan.kind !== "rest" && <div className="dmark missed">×</div>}
                         </td>
                       );
                     })}
-                    <td className="num" style={{ fontSize: 12 }}>
-                      {w.plannedMiles}
-                      {!w.past && w.doneMiles != null && <div style={{ color: "var(--faint)", fontSize: 11 }}>{w.doneMiles} done</div>}
+                    <td className="num" style={{ fontSize: 11.5 }}>
+                      {w.plannedMi ? <div style={{ color: HEX.run }}>{w.plannedMi}</div> : null}
+                      {w.ranMi ? <div style={{ color: "var(--faint)" }}>{w.ranMi}</div> : null}
                     </td>
                   </tr>
                 );
@@ -2934,63 +3035,93 @@ function Calendar({ daily, settings, setSettings }) {
             </tbody>
           </table>
           <div className="legend">
-            <span><i style={{ background: HEX.run }} />run</span>
-            <span><i style={{ background: HEX.lift }} />lift</span>
-            <span><i style={{ background: HEX.rest }} />rest</span>
-            <span><i style={{ background: HEX.alert }} />race</span>
-            <span>✓ done · ~ short · × missed · + extra · ★ a run at {plan.type.peakLong}+</span>
+            <span><i style={{ background: HEX.run }} />planned</span>
+            <span><i style={{ background: HEX.rest }} />actually ran</span>
+            <span><i style={{ background: HEX.alert }} />🏁 race day</span>
+            <span>× a planned session with nothing logged · a dot marks a day you edited</span>
           </div>
         </div>
       </div>
 
-      {pick && (() => {
-        const x = daily.get(pick.date);
-        const prev = daily.get(addDays(pick.date, -1));
-        const isPast = pick.date < today;
-        return (
-          <div className="panel">
-            <h2>{pick.dow} {fmtDayLabel(pick.date)} <button className="del" onClick={() => setPick(null)} style={{ fontSize: 13 }}>close</button></h2>
-            <div className="body">
-              <div className="row" style={{ marginBottom: 8 }}>
-                <span className={`tag ${pick.kind === "race" ? "run" : pick.kind}`}>{pick.kind}</span>
-                <b style={{ fontSize: 15 }}>{pick.title}</b>
-                {pick.miles ? <span className="note">{pick.miles} {u}{pick.pace ? ` at ${secsToClock(pick.pace)}/${u}` : ""}</span> : null}
-              </div>
-              {pick.note && <p className="note" style={{ color: "var(--ink)" }}>{pick.note}</p>}
-              {pick.flexible && !isPast && <p className="note" style={{ marginTop: 6 }}>Drag it to Friday or Saturday if the weekend demands — the plan only cares that it happens.</p>}
-
-              <div className="divline" />
-              <div className="grid4" style={{ gap: 12 }}>
-                <Stat v={x.sleep?.score ?? null} l="slept" color={HEX.sleep}
-                      sub={x.sleep?.asleepMin ? minsToHM(x.sleep.asleepMin) : "not logged"} />
-                <Stat v={x.sleep?.restingHr ?? null} l="resting HR" color={HEX.rhr} />
-                <Stat v={prev.alc || prev.thcMg ? [prev.alc ? `${round(prev.alc, 1)} drinks` : null, prev.thcMg ? `${round(prev.thcMg, 1)} mg` : null].filter(Boolean).join(", ") : "clean"}
-                      l="the night before" color={prev.alc > 4.5 || prev.thcMg > 5 ? HEX.alert : HEX.rest} />
-                <Stat v={x.hasRun ? `${round(toUnit(x.runKm, u), 1)} ${u}` : x.hasLift ? "lift" : isPast ? "nothing" : "—"}
-                      l={isPast ? "what you actually did" : "logged so far"} color={x.hasRun ? HEX.run : HEX.rest}
-                      sub={x.paceSecKm ? `${secsToClock(u === "mi" ? x.paceSecKm * 1.609344 : x.paceSecKm)}/${u}` : ""} />
-              </div>
-              {x.note && <p className="note" style={{ marginTop: 10 }}>{x.note}</p>}
-              {!isPast && pick.miles >= plan.type.peakLong * 0.9 && (
-                <p className="note" style={{ marginTop: 10 }}>
-                  A big one. Worth a quiet night before — the Sleep tab shows your score drops after drinking, and that shows up in pace the next morning.
-                </p>
-              )}
-            </div>
-          </div>
-        );
-      })()}
-
-      <div className="panel">
-        <h2>Paces <span className="hint">from your goal time</span></h2>
-        <div className="body">
-          <div className="grid4" style={{ gap: 12 }}>
-            {[["race", "race pace"], ["long", "long runs"], ["easy", "easy days"], ["steady", "medium-long"], ["tempo", "tempo"], ["interval", "intervals"]].map(([k, l]) => (
-              <Stat key={k} v={secsToClock(plan.paces[k])} l={`${l} / ${u}`} color={k === "race" ? HEX.alert : HEX.run} />
-            ))}
+      {pick && (
+        <div className="panel">
+          <h2>{pick.dow} {fmtDayLabel(pick.date)}
+            <button className="del" onClick={() => { setPick(null); setEdit(null); }} style={{ fontSize: 13 }}>close</button>
+          </h2>
+          <div className="body">
+            {pick.race && (
+              <p className="note" style={{ marginBottom: 10, color: HEX.alert, fontSize: 14 }}>
+                <b>🏁 {pick.race.name || raceType(pick.race.kind).name}</b> · {round(Number(pick.race.distanceMi) || raceType(pick.race.kind).miles, 1)} {u}
+                {pick.race.goalTime ? ` · goal ${pick.race.goalTime}` : ""}
+                {pick.race.resultTime ? ` · ran ${pick.race.resultTime}` : ""}
+                {pick.race.notes ? ` — ${pick.race.notes}` : ""}
+              </p>
+            )}
+            {!edit ? (
+              <>
+                <div className="row" style={{ marginBottom: 10 }}>
+                  {pick.plan ? (
+                    <>
+                      <span className={`tag ${pick.plan.kind === "race" ? "run" : pick.plan.kind}`}>{pick.plan.kind}</span>
+                      <b style={{ fontSize: 15 }}>{pick.plan.title}</b>
+                      {pick.plan.miles ? <span className="note">{pick.plan.miles} {u}{pick.plan.pace ? ` at ${secsToClock(pick.plan.pace)}/${u}` : ""}</span> : null}
+                      <button className="ghost" onClick={() => setEdit({ ...pick.plan })}>Edit</button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="note">Nothing planned for this day.</span>
+                      {pick.date >= today && <button className="ghost" onClick={() => setEdit({ date: pick.date, kind: "run", title: "Easy", miles: 5, note: "" })}>Add a session</button>}
+                    </>
+                  )}
+                </div>
+                {pick.plan?.note && <p className="note" style={{ color: "var(--ink)" }}>{pick.plan.note}</p>}
+                <div className="divline" />
+                <div className="grid4" style={{ gap: 12 }}>
+                  <Stat v={pick.ran ? `${pick.ran} ${u}` : pick.lifted ? "lift" : pick.past ? "nothing" : "—"}
+                        l={pick.past ? "what you did" : "logged so far"} color={pick.ran ? HEX.run : HEX.rest}
+                        sub={pick.pace ? `${secsToClock(pick.pace)}/${u}` : ""} />
+                  <Stat v={pick.sleep ?? null} l="slept" color={HEX.sleep} />
+                  <Stat v={pick.rhr ?? null} l="resting HR" color={HEX.rhr} />
+                  <Stat v={pick.drinks || pick.thc ? [pick.drinks ? `${pick.drinks} drinks` : null, pick.thc ? `${pick.thc} mg` : null].filter(Boolean).join(", ") : "clean"}
+                        l="that day" color={pick.drinks > 4.5 || pick.thc > 5 ? HEX.alert : HEX.rest} />
+                </div>
+                {pick.note && <p className="note" style={{ marginTop: 10 }}>{pick.note}</p>}
+              </>
+            ) : (
+              <>
+                <div className="row">
+                  <label className="f" style={{ width: 108 }}>Type
+                    <select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value })}>
+                      <option value="run">Run</option><option value="lift">Lift</option><option value="rest">Rest</option>
+                    </select>
+                  </label>
+                  <label className="f" style={{ flex: 1, minWidth: 140 }}>Session
+                    <input value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} />
+                  </label>
+                  <label className="f" style={{ width: 90 }}>{u}
+                    <input value={edit.miles ?? ""} inputMode="decimal" onChange={(e) => setEdit({ ...edit, miles: e.target.value === "" ? null : Number(e.target.value) })} />
+                  </label>
+                </div>
+                <label className="f" style={{ marginTop: 10 }}>Note
+                  <textarea rows={2} value={edit.note || ""} onChange={(e) => setEdit({ ...edit, note: e.target.value })} />
+                </label>
+                <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                  <button className="solid" onClick={() => {
+                    if (byDate.has(edit.date)) updateDay(edit.date, edit); else addDay(edit);
+                    setEdit(null); setPick(null);
+                  }}>Save</button>
+                  <button className="ghost" onClick={() => setEdit(null)}>Cancel</button>
+                  {byDate.has(edit.date) && (
+                    <button className="danger" onClick={() => { setPlanned((planned || []).filter((d) => d.date !== edit.date)); setEdit(null); setPick(null); }}>
+                      Remove from plan
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
-      </div>
+      )}
     </>
   );
 }
@@ -3776,6 +3907,7 @@ function withDefaults(st) {
   s.priorRace = { distanceMi: 26.2, time: "", date: "", ...(s.priorRace || {}) };
   if (s.planStart === undefined) s.planStart = null;
   if (!Array.isArray(s.planAdjust)) s.planAdjust = [];
+  if (!Array.isArray(s.races)) s.races = [];
   if (!Array.isArray(s.planSwaps)) s.planSwaps = [];
   s.planPrefs = { ...DEFAULT_PREFS, ...(s.planPrefs || {}) };
   if (!Array.isArray(s.planPrefs.longRunDays) || !s.planPrefs.longRunDays.length) s.planPrefs.longRunDays = DEFAULT_PREFS.longRunDays;
@@ -3814,14 +3946,17 @@ export default function HealthLog({ email, onSignOut }) {
   const [lifts, setLifts] = useState([]);
   const [days, setDays] = useState([]);
   const [spend, setSpend] = useState([]);
+  const [planned, setPlanned] = useState([]);   // the training plan, once generated: editable records
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
   useEffect(() => {
     (async () => {
-      const [d, s, se, l, st, dy, sp] = await Promise.all([
+      const [d, s, se, l, st, dy, sp, pl] = await Promise.all([
         store.get(KEYS.doses), store.get(KEYS.sleep), store.get(KEYS.sessions),
         store.get(KEYS.lifts), store.get(KEYS.settings), store.get(KEYS.days), store.get(KEYS.spend),
+        store.get(KEYS.plan),
       ]);
+      if (pl) setPlanned(pl);
       if (dy) setDays(dy);
       if (sp) setSpend(sp);
       if (d) setDoses(d);
@@ -3851,6 +3986,7 @@ export default function HealthLog({ email, onSignOut }) {
   useEffect(() => { save(KEYS.lifts, lifts); }, [lifts, save]);
   useEffect(() => { save(KEYS.days, days); }, [days, save]);
   useEffect(() => { save(KEYS.spend, spend); }, [spend, save]);
+  useEffect(() => { save(KEYS.plan, planned); }, [planned, save]);
   useEffect(() => { save(KEYS.settings, settings); }, [settings, save]);
 
   // Strong sets become lift sessions unless a hand-logged lift already covers that day.
@@ -3874,10 +4010,12 @@ export default function HealthLog({ email, onSignOut }) {
   const upsertDay = (rec) => setDays((x) => mergeBy(x, [rec], (r) => r.date));
   const addSession = (s) => setManualSessions((x) => [...x, s]);
   const removeSession = (id) => setManualSessions((x) => x.filter((s) => s.id !== id));
-  const resetAll = () => { setDoses([]); setSleep([]); setManualSessions([]); setLifts([]); setDays([]); setSpend([]); setSettings(DEFAULT_SETTINGS); };
+  const resetAll = () => { setDoses([]); setSleep([]); setManualSessions([]); setLifts([]); setDays([]); setSpend([]); setPlanned([]); setSettings(DEFAULT_SETTINGS); };
   const goLog = (k) => { setDayKey(k); setTab("log"); };
 
-  const raceDate = settings.race.date ? fromDayKey(settings.race.date) : null;
+  const nextRace = (settings.races || []).filter((r) => r.date >= toDayKey(new Date()))
+    .sort((a, b) => (a.date < b.date ? -1 : 1))[0] || null;
+  const raceDate = nextRace ? fromDayKey(nextRace.date) : null;
   const daysOut = raceDate ? Math.ceil((raceDate - new Date()) / 864e5) : null;
 
   const tabs = [["log", "Log"], ["overview", "Overview"], ["sleep", "Sleep"], ["training", "Training"], ["intake", "Intake"], ["calendar", "Calendar"], ["spend", "Spend"], ["data", "Data"]];
@@ -3894,7 +4032,7 @@ export default function HealthLog({ email, onSignOut }) {
           <div className="brand">Health log <span>· {fromDayKey(toDayKey(new Date())).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</span></div>
           <div className="race">
             {daysOut != null && daysOut >= 0 ? (
-              <><b>{daysOut} days</b>to {settings.race.name || "race day"}{settings.race.goalTime ? `, goal ${settings.race.goalTime}` : ""}</>
+              <><b>{daysOut} days</b>to {nextRace.name || raceType(nextRace.kind).name}{nextRace.goalTime ? `, goal ${nextRace.goalTime}` : ""}</>
             ) : <>No race set</>}
             <div className="themepick" style={{ marginTop: 6 }}>
               <span className="seg" role="group" aria-label="Colour theme">
@@ -3930,7 +4068,8 @@ export default function HealthLog({ email, onSignOut }) {
         {tab === "intake" && <Boundary where="Intake"><IntakeDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
         {tab === "calendar" && (
           <Boundary where="The calendar">
-            <CalendarWrap doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} setSettings={setSettings} />
+            <CalendarWrap doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} setSettings={setSettings}
+                          planned={planned} setPlanned={setPlanned} />
           </Boundary>
         )}
         {tab === "spend" && (
@@ -3941,7 +4080,7 @@ export default function HealthLog({ email, onSignOut }) {
         )}
         {tab === "data" && (
           <Boundary where="The data tab">
-          <Data state={{ doses, sleep, sessions: manualSessions, lifts, days, spend, settings }} setSleep={setSleep} setSessions={setManualSessions}
+          <Data state={{ doses, sleep, sessions: manualSessions, lifts, days, spend, plan: planned, settings }} setSleep={setSleep} setSessions={setManualSessions}
                 setLifts={setLifts} setDoses={setDoses} setDays={setDays} setSpend={setSpend} settings={settings} setSettings={setSettings}
                 resetAll={resetAll} storageOk={storageOk} />
           </Boundary>

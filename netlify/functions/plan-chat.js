@@ -24,12 +24,13 @@ Return JSON only:
 }
 
 Operations available:
-- {"op":"setDay","date":"YYYY-MM-DD","kind":"run|lift|rest","title":"Long run","miles":20,"note":"optional"}
+- {"op":"setDay","date":"YYYY-MM-DD","kind":"run|lift|rest","title":"Long run","miles":20,"lift":"Push — upper","note":"optional"}
+  "lift" is optional and sits alongside the run: a day can be an easy 5 miles AND a push session. Use kind "lift" only when the day is a lift and nothing else. Omitting "lift" keeps whatever lift was already on that day; send "lift": null to remove it.
 - {"op":"moveDay","from":"YYYY-MM-DD","to":"YYYY-MM-DD"} — swaps the two days
 - {"op":"scaleWeek","monday":"YYYY-MM-DD","factor":0.8} — scales every run that week
 
 Reading shorthand:
-A message like "Set exactly, 2026: 10/26 rest; 10/27 intervals 4; 10/31 long run 15" is a list of days in M/D format for the year given. Convert each to a setDay operation: the number is miles, the words are the title, "rest" means kind rest, anything with "lift" means kind lift, everything else is kind run. Emit one operation per day listed, in order, and do not add days that were not listed.
+A message like "Set exactly, 2026: 10/26 rest; 10/27 intervals 4; 10/30 easy 5 + push; 10/31 long run 15" is a list of days in M/D format for the year given. Convert each to a setDay operation: the number is miles, the words are the title, "rest" means kind rest, everything else is kind run. A "+ push" or "+ legs" or "+ lift" after a run means that day also has a lift — set "lift" to "Push — upper" or "Pull & legs" accordingly and keep kind "run". A day that is only "pull+legs lift" or "push lift" has kind "lift". Emit one operation per day listed, in order, and do not add days that were not listed.
 
 Rules:
 - Only edit dates in the calendar you are shown. Never invent dates.

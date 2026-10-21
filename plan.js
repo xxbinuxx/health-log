@@ -8,7 +8,7 @@
 
 import {
   addDays, toDayKey, fromDayKey, lastNDays, mondayOf, round, avg, sum, median,
-  toUnit, secsToClock, fmtShort, trainingLoad, staminaFrom,
+  toUnit, secsToClock, fmtShort, trainingLoad, staminaFrom, staminaWeekly,
 } from "./scores.js";
 
 const MARATHON_MI = 26.2;
@@ -277,7 +277,8 @@ export function currentForm(daily, settings, todayKey, T, goalSeconds, priorRace
     hist, fit, recentWeekly: recent, priorWeekly: before, trend, consistency,
     fitness: round(fitness, 2), fatigue: round(fatigue, 2),
     freshness: fitness > 0 ? round(((fitness - fatigue) / fitness) * 100, 0) : null,
-    stamina: round(staminaFrom(fitness, settings), 0),
+    stamina: round(staminaFrom(fitness), 0),
+    staminaWeekly: round(staminaWeekly(fitness), 1),
     longest: fit.longest, predicted, ambition, need,
     gap: round(need.peak - recent, 1),
   };

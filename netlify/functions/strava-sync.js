@@ -1,5 +1,5 @@
 // Catch-up sync: pull runs on demand, in pages, so a full history works as well as a recent top-up.
-import { admin, freshToken, isRun, toSession, mergeSessions, json, userFromRequest } from "./lib/shared.js";
+import { admin, freshToken, isRun, isLift, toSession, toLift, mergeSessions, json, userFromRequest } from "./lib/shared.js";
 
 export async function handler(event) {
   try {
@@ -28,19 +28,23 @@ export async function handler(event) {
       if (!Array.isArray(list)) return json(502, { error: `Strava said: ${JSON.stringify(list)}` });
       if (!list.length) break;
       seen += list.length;
-      for (const a of list) if (isRun(a.sport_type || a.type)) runs.push(toSession(a));
+      for (const a of list) {
+        const t = a.sport_type || a.type;
+        if (isRun(t)) runs.push(toSession(a));
+        else if (isLift(t)) runs.push(toLift(a));     // gym sessions land as lifts
+      }
       if (list.length < 200) break;
     }
 
     if (!runs.length) {
-      return json(200, { added: 0, total: 0, message: `Looked at ${seen} activities and found no runs.` });
+      return json(200, { added: 0, total: 0, message: `Looked at ${seen} activities and found nothing to import.` });
     }
 
     const res = await mergeSessions(db, user.id, runs);
     const note = hitCap ? " Strava paused us on rate limits, so run this again in fifteen minutes to finish." : "";
     return json(200, {
       ...res,
-      message: `${runs.length} run${runs.length === 1 ? "" : "s"} read from ${seen} activities, ${res.added} new.${note}`,
+      message: `${runs.filter((r) => r.kind === "run").length} run${runs.filter((r) => r.kind === "run").length === 1 ? "" : "s"} and ${runs.filter((r) => r.kind === "lift").length} lift${runs.filter((r) => r.kind === "lift").length === 1 ? "" : "s"} read from ${seen} activities, ${res.added} new.${note}`,
     });
   } catch (e) {
     return json(500, { error: String(e.message || e) });

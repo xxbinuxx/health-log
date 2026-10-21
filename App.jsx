@@ -1371,10 +1371,15 @@ function Overview({ doses, sleep, sessions, days, settings, range, goLog }) {
 
 const SCORES = {
   regen: { name: "Regen", color: HEX.sleep, good: true, tag: "sleep", blurb: "higher means better sleep" },
-  run:   { name: "Stamina", color: HEX.run, good: true, tag: "running", blurb: "higher means more distance, faster pace" },
+  run:   { name: "Stamina", color: HEX.run, good: true, tag: "running", blurb: "your aerobic fitness, as a weekly distance equivalent" },
   degen: { name: "Degen", color: HEX.alert, good: false, tag: "intake", blurb: "higher means more intake; big nights count extra" },
 };
 const SCORE_KEYS = ["regen", "run", "degen"];
+/* Only Degen is worth measuring against your own spread: it is spiky and unbounded, so
+   "heavier than usual" is the useful reading. Regen lives in a tight band and Stamina
+   moves slowly by design — indexing those exaggerates noise and pegs at 100. They are
+   better read absolutely, on a scale that means the same thing next year. */
+const INDEXED = { regen: false, run: false, degen: true };
 // line style carries the series as well as colour, so the chart survives without colour
 const SCORE_DASH = { regen: "0", run: "7 4", degen: "2 3" };
 const scoreWord = (v, good) => (v == null ? "no data yet" : good
@@ -1407,7 +1412,7 @@ function useScores(daily, settings, range) {
       band[k] = vals.length >= 3
         ? { median: round(median(vals), 1), lo: round(quantile(sorted, 0.05), 1), hi: round(quantile(sorted, 0.95), 1), n: vals.length }
         : null;
-      rel[k] = indexed ? round(relToMedian(now?.[k], vals), 0) : null;
+      rel[k] = indexed && INDEXED[k] ? round(relToMedian(now?.[k], vals), 0) : null;
     }
 
     const chart = bucketize(span, range).map((b) => ({
@@ -1421,22 +1426,25 @@ function useScores(daily, settings, range) {
 }
 
 /* The headline number: placed against the window when there is enough of it, raw otherwise. */
-function ScoreStat({ which, now, rel, band, delta, indexed }) {
+function ScoreStat({ which, now, rel, band, delta, indexed, unit }) {
   const m = SCORES[which];
   const raw = now?.[which];
-  const v = indexed ? rel[which] : raw;
+  const useIndex = indexed && INDEXED[which] && rel[which] != null;
+  const v = useIndex ? rel[which] : raw;
   const b = band[which];
   const d = delta?.[which];
-  // the index is self-relative, so a sustained change only shows as a window-on-window move
-  const move = d == null || Math.abs(d) < 0.5 ? null
-    : `${d > 0 ? "▲" : "▼"} ${Math.abs(d)} vs the ${band[which]?.n ? "previous" : "prior"} period`;
+  const move = d == null || Math.abs(d) < 0.5 ? null : `${d > 0 ? "▲" : "▼"} ${Math.abs(d)} on the period before`;
+
+  // Stamina reads in the unit it is actually made of
+  const weekly = which === "run" && now?.staminaWeekly != null ? now.staminaWeekly : null;
   const sub = raw == null ? "nothing logged yet"
-    : indexed && v != null && b
-      ? `${Math.round(raw)} raw · median ${b.median}${move ? ` · ${move}` : ""}`
-      : `${m.tag} has been ${scoreWord(raw, m.good)}${move ? ` · ${move}` : ""}`;
+    : useIndex ? `${Math.round(raw)} raw · median ${b?.median}${move ? ` · ${move}` : ""}`
+    : weekly != null ? `about ${weekly} ${unit || "mi"}/week of fitness${move ? ` · ${move}` : ""}`
+    : `${m.tag} has been ${scoreWord(raw, m.good)}${move ? ` · ${move}` : ""}`;
+  const label = useIndex ? `${m.name}, vs window` : which === "run" ? `${m.name}, 0–100 fixed` : m.name;
   return (
-    <Stat v={v != null ? Math.round(v) : null} l={indexed && v != null ? `${m.name}, vs window` : `${m.name}, raw`}
-          color={m.color} sub={sub} bar={v != null ? { pct: v, color: m.color } : null} />
+    <Stat v={v != null ? Math.round(v) : null} l={label} color={m.color} sub={sub}
+          bar={v != null ? { pct: v, color: m.color } : null} />
   );
 }
 
@@ -1508,11 +1516,11 @@ function ScoreTrio({ daily, settings, range }) {
   return (
     <div className="panel">
       <h2>Regen, Stamina and Degen
-        <span className="hint">{sc.indexed ? `against your own last ${range} days: 50 is your median, 0 and 100 the 5th and 95th percentiles` : "raw scores; choose 30d or longer to index them"}</span>
+        <span className="hint">Regen and Stamina are absolute; Degen is placed against your own last {range} days</span>
       </h2>
       <div className="body">
         <div className="grid3" style={{ gap: 12, marginBottom: 12 }}>
-          {SCORE_KEYS.map((k) => <ScoreStat key={k} which={k} {...sc} />)}
+          {SCORE_KEYS.map((k) => <ScoreStat key={k} which={k} unit={settings.distanceUnit} {...sc} />)}
         </div>
         <ScoreLines chart={sc.chart} keys={SCORE_KEYS} band={sc.band} range={range} h={240} />
         <div className="legend">
@@ -1539,12 +1547,18 @@ function ScorePanel({ which, daily, settings, range }) {
   return (
     <div className="panel">
       <h2>{m.name} Score
-        <span className="hint">{m.blurb}{sc.indexed ? ` · yesterday, against your last ${range} days` : " · yesterday"}</span>
+        <span className="hint">{m.blurb} · yesterday{INDEXED[which] && sc.indexed ? `, against your last ${range} days` : which === "run" ? ", on a fixed 0–100 scale where 100 is 70 a week" : ""}</span>
       </h2>
       <div className="body">
         <div className="scorerow">
           <div>
-            <ScoreStat which={which} {...sc} />
+            <ScoreStat which={which} unit={settings.distanceUnit} {...sc} />
+            {which === "run" && sc.now?.staminaWeekly != null && (
+              <p className="note" style={{ marginTop: 8 }}>
+                Your engine is worth about <b>{sc.now.staminaWeekly} {settings?.distanceUnit || "mi"} a week</b> right now —
+                a weighted average of the last four weeks of running, with the recent days counting most.
+              </p>
+            )}
             {which === "run" && sc.now?.freshness != null && (
               <div style={{ marginTop: 10 }}>
                 <Stat v={`${sc.now.freshness > 0 ? "+" : ""}${Math.round(sc.now.freshness)}%`} l="Freshness"
@@ -1555,7 +1569,7 @@ function ScorePanel({ which, daily, settings, range }) {
                         : "carrying real fatigue"} />
               </div>
             )}
-            {sc.indexed && raw != null && b && (
+            {INDEXED[which] && sc.indexed && raw != null && b && (
               <p className="note" style={{ marginTop: 8 }}>
                 {r == null ? "Not enough days in this window to place it."
                   : r >= 50

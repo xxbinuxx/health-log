@@ -64,6 +64,34 @@ function inferRunType(name, distKm, sportType) {
 }
 
 export const isRun = (t) => /run|jog|trail|treadmill/i.test(t || "");
+/* Strava's own gym activity types, so lifts stop needing to be logged by hand. */
+export const isLift = (t) => /weight ?training|workout|crossfit/i.test(t || "");
+
+function inferLiftType(name) {
+  const s = String(name || "").toLowerCase();
+  if (/pull/.test(s) && /leg|squat/.test(s)) return "lower";
+  if (/push|chest|bench|shoulder|press|tricep/.test(s)) return "push";
+  if (/pull|back|row|lat|bicep|chin/.test(s)) return "pull";
+  if (/leg|squat|deadlift|rdl|lunge|calf/.test(s)) return "legs";
+  if (/upper/.test(s)) return "upper";
+  return "full body";
+}
+
+/* A gym session from Strava, in the shape the app stores lifts in. */
+export function toLift(a) {
+  const local = String(a.start_date_local || a.start_date || "");
+  const name = String(a.name || "Lift").slice(0, 80);
+  return {
+    id: `strava-${a.id}`,
+    date: local.slice(0, 10),
+    ts: new Date(a.start_date || local).getTime(),
+    kind: "lift",
+    type: inferLiftType(name),
+    name,
+    movingSec: a.moving_time || a.elapsed_time || null,
+    note: "", source: "strava",
+  };
+}
 
 // One Strava activity in the shape the app stores sessions in.
 export function toSession(a) {

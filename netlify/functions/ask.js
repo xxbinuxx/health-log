@@ -103,7 +103,9 @@ export function digest(state, todayKey) {
   };
   // the race, the plan and how it is actually going — the questions people ask most
   let plan = null;
-  const r = state.settings?.race;
+  const todayK = todayKey;
+  const upcoming = (state.settings?.races || []).filter((x) => x.date >= todayK).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+  const r = upcoming || state.settings?.race;
   if (r?.goalTime && r?.date) {
     const parts = String(r.goalTime).split(":").map(Number);
     const sec = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts.length === 2 ? parts[0] * 60 + parts[1] : null;

@@ -2763,9 +2763,10 @@ function PlanChat({ settings, setSettings, planned, setPlanned }) {
       if (op.op === "setDay") {
         const i = at(op.date);
         const row = { date: op.date, kind: op.kind || "run", title: op.title || "Run",
-          miles: op.miles ?? null, pace: null, note: op.note || "", edited: true };
+          miles: op.miles ?? null, pace: null, note: op.note || "",
+          lift: op.lift ?? (i >= 0 ? rows[i].lift ?? null : null), edited: true };
         if (i >= 0) rows[i] = { ...rows[i], ...row }; else rows.push(row);
-        done.push(`${op.date}: ${row.title}${row.miles ? ` ${row.miles}` : ""}`);
+        done.push(`${op.date}: ${row.title}${row.miles ? ` ${row.miles}` : ""}${row.lift ? ` + ${row.lift}` : ""}`);
       } else if (op.op === "moveDay") {
         const a = at(op.from), b = at(op.to);
         if (a < 0) { refused.push(`nothing planned on ${op.from}`); continue; }
@@ -2880,6 +2881,7 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
       const rows = p.weeks.flatMap((w) => w.days.map((d) => ({
         date: d.date, kind: d.kind, title: d.title,
         miles: d.miles ?? null, pace: d.pace ?? null, note: d.note || "",
+        lift: d.kind === "lift" ? d.title : null,
       })));
       // keep anything you have already edited unless you asked to replace it
       const keep = replace ? new Map() : new Map((planned || []).filter((d) => d.edited).map((d) => [d.date, d]));
@@ -2894,7 +2896,7 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
   const swapDays = (a, b) => {
     if (!a || !b || a === b) return;
     const A = byDate.get(a), B = byDate.get(b);
-    const body = (x) => (x ? { kind: x.kind, title: x.title, miles: x.miles, pace: x.pace, note: x.note } : { kind: "rest", title: "Rest", miles: null, pace: null, note: "" });
+    const body = (x) => (x ? { kind: x.kind, title: x.title, miles: x.miles, pace: x.pace, note: x.note, lift: x.lift ?? null } : { kind: "rest", title: "Rest", miles: null, pace: null, note: "", lift: null });
     setPlanned((planned || []).map((d) =>
       d.date === a ? { ...d, ...body(B), edited: true }
       : d.date === b ? { ...d, ...body(A), edited: true } : d));
@@ -3046,11 +3048,12 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
                           )}
                           {!d.race && d.plan && (
                             <div className="dtitle" style={{ color: d.plan.kind === "race" ? HEX.alert : d.plan.kind === "lift" ? HEX.lift : d.plan.kind === "rest" ? HEX.rest : HEX.run }}>
-                              {d.plan.kind === "rest" ? "rest" : d.plan.miles ? `${d.plan.miles}` : "lift"}
+                              {d.plan.kind === "rest" && !d.plan.lift ? "rest" : d.plan.miles ? `${d.plan.miles}` : "lift"}
+                              {d.plan.lift && d.plan.kind !== "lift" && <span style={{ color: HEX.lift }}>+L</span>}
                               {d.plan.edited && <span style={{ color: "var(--navy)" }}>·</span>}
                             </div>
                           )}
-                          {!d.race && d.plan && <div className="dsub">{d.plan.kind === "rest" ? "" : d.plan.title.replace(" run", "").replace("Race-pace", "RP")}</div>}
+                          {!d.race && d.plan && <div className="dsub">{d.plan.kind === "rest" && !d.plan.lift ? "" : (d.plan.kind === "lift" ? d.plan.title : d.plan.title.replace(" run", "").replace("Race-pace", "RP"))}{d.plan.lift && d.plan.kind !== "lift" ? ` · ${d.plan.lift.replace("Lift — ", "").replace("Push — upper", "push")}` : ""}</div>}
                           {(d.ran || d.lifted) && (
                             <div className={`dmark ${hit == null ? "done" : hit >= 0.85 ? "done" : hit >= 0.5 ? "short" : "short"}`}>
                               {d.ran ? `${d.ran}` : "lift"}{d.ran && d.lifted ? "+L" : ""}
@@ -3075,7 +3078,7 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
             <span><i style={{ background: HEX.run }} />planned</span>
             <span><i style={{ background: HEX.rest }} />actually ran</span>
             <span><i style={{ background: HEX.alert }} />🏁 race day</span>
-            <span>× a planned session with nothing logged · a dot marks a day you edited</span>
+            <span>+L means a lift that day as well · × a planned session with nothing logged · a dot marks a day you edited</span>
           </div>
         </div>
       </div>
@@ -3102,6 +3105,7 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
                       <span className={`tag ${pick.plan.kind === "race" ? "run" : pick.plan.kind}`}>{pick.plan.kind}</span>
                       <b style={{ fontSize: 15 }}>{pick.plan.title}</b>
                       {pick.plan.miles ? <span className="note">{pick.plan.miles} {u}{pick.plan.pace ? ` at ${secsToClock(pick.plan.pace)}/${u}` : ""}</span> : null}
+                      {pick.plan.lift && pick.plan.kind !== "lift" && <span className="tag lift">+ {pick.plan.lift}</span>}
                       <button className="ghost" onClick={() => setEdit({ ...pick.plan })}>Edit</button>
                     </>
                   ) : (
@@ -3138,6 +3142,17 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
                   <label className="f" style={{ width: 90 }}>{u}
                     <input value={edit.miles ?? ""} inputMode="decimal" onChange={(e) => setEdit({ ...edit, miles: e.target.value === "" ? null : Number(e.target.value) })} />
                   </label>
+                </div>
+                <div className="row" style={{ marginTop: 10 }}>
+                  <label className="f" style={{ flex: 1, minWidth: 180 }}>Lift as well <span style={{ color: "var(--faint)" }}>(leave blank for none)</span>
+                    <input value={edit.lift ?? ""} placeholder="Push — upper" onChange={(e) => setEdit({ ...edit, lift: e.target.value || null })} />
+                  </label>
+                  <div className="chips" style={{ paddingBottom: 4 }}>
+                    {["Push — upper", "Pull & legs", ""].map((x) => (
+                      <button key={x || "none"} className="tchip" aria-pressed={(edit.lift || "") === x}
+                              onClick={() => setEdit({ ...edit, lift: x || null })}>{x || "none"}</button>
+                    ))}
+                  </div>
                 </div>
                 <label className="f" style={{ marginTop: 10 }}>Note
                   <textarea rows={2} value={edit.note || ""} onChange={(e) => setEdit({ ...edit, note: e.target.value })} />

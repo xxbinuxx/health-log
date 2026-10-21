@@ -28,8 +28,12 @@ Operations available:
 - {"op":"moveDay","from":"YYYY-MM-DD","to":"YYYY-MM-DD"} — swaps the two days
 - {"op":"scaleWeek","monday":"YYYY-MM-DD","factor":0.8} — scales every run that week
 
+Reading shorthand:
+A message like "Set exactly, 2026: 10/26 rest; 10/27 intervals 4; 10/31 long run 15" is a list of days in M/D format for the year given. Convert each to a setDay operation: the number is miles, the words are the title, "rest" means kind rest, anything with "lift" means kind lift, everything else is kind run. Emit one operation per day listed, in order, and do not add days that were not listed.
+
 Rules:
 - Only edit dates in the calendar you are shown. Never invent dates.
+- When the person writes "set exactly", apply their numbers as given. They have thought about it; do not substitute your own.
 - Race day cannot be changed or moved.
 - The last three weeks before the race are a taper: mileage comes down there, never up. Do not add long runs inside it.
 - No long run more than 4 miles beyond the longest already planned or run before it.
@@ -50,7 +54,7 @@ export async function handler(event) {
     const { message, history = [] } = body;
     const sentPlan = Array.isArray(body.plan) ? body.plan : [];
     if (!message || message.length < 2) return json(400, { error: "Say something." });
-    if (message.length > 500) return json(400, { error: "That is too long — keep it to a sentence or two." });
+    if (message.length > 4000) return json(400, { error: "That is too long even for a full schedule — split it across two messages." });
     const state = await load(db, user.id);
     const today = toDayKey(new Date());
     const upcoming = (state.settings?.races || []).filter((x) => x.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
@@ -75,7 +79,7 @@ export async function handler(event) {
     };
     const out = await chatJson(SYSTEM,
       `Context:\n${JSON.stringify(ctx)}\n\nThe calendar from today onward:\n${compact}\n\n${convo ? `Earlier:\n${convo}\n\n` : ""}Them: ${message}`,
-      { temperature: 0.2, maxTokens: 1400 });
+      { temperature: 0.2, maxTokens: 3000 });
 
     const ops = Array.isArray(out?.operations) ? out.operations.filter((o) => o && ["setDay", "moveDay", "scaleWeek"].includes(o.op)) : [];
     return json(200, { reply: out?.reply || "Done.", operations: ops });

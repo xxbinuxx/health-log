@@ -499,16 +499,29 @@ const CSS = `
 .hl .saved{font-size:11.5px;color:var(--lift);}
 .hl .tag.stim{background:var(--stim);}
 .hl .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--rule-soft);color:var(--soft);}
-.hl table.cal{table-layout:fixed;}
-.hl table.cal th{text-align:center;font-size:10.5px;}
-.hl .cell{border:1px solid var(--rule-soft);padding:4px 3px;vertical-align:top;cursor:pointer;height:58px;}
+.hl .calwrap{overflow-x:auto;overflow-y:visible;}
+.hl table.cal{table-layout:fixed;width:100%;min-width:680px;border-collapse:separate;border-spacing:0;}
+/* every day column the same width, whatever the range */
+.hl table.cal col.daycol{width:12.4%;}
+.hl table.cal col.wkcol{width:7.4%;}
+.hl table.cal col.micol{width:6.6%;}
+.hl table.cal thead th{position:sticky;top:0;z-index:2;background:var(--card);
+  text-align:center;font-size:10.5px;padding:5px 2px;border-bottom:1px solid var(--rule);}
+.hl .cell{border:1px solid var(--rule-soft);padding:4px 3px;vertical-align:top;cursor:pointer;
+  height:62px;overflow:hidden;}
 .hl .cell:hover{border-color:var(--rule);}
 .hl .cell.today{outline:2px solid var(--navy);outline-offset:-2px;}
 .hl .cell.empty-cell{background:var(--paper);cursor:default;}
-.hl .cell .dnum{font-size:10px;color:var(--faint);}
-.hl .cell .dtitle{font-size:12px;font-weight:600;letter-spacing:-0.01em;}
-.hl .cell .dsub{font-size:10px;color:var(--soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.hl .cell .dmark{font-size:10px;margin-top:1px;}
+.hl .cell .dnum{font-size:10px;color:var(--faint);line-height:1.2;}
+.hl .cell .dtitle{font-size:12px;font-weight:600;letter-spacing:-0.01em;line-height:1.25;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.hl .cell .dsub{font-size:10px;color:var(--soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3;}
+.hl .cell .dmark{font-size:10px;margin-top:1px;line-height:1.2;white-space:nowrap;}
+/* the first row of a new month gets a rule, so long ranges stay readable */
+.hl tr.newmonth td{border-top:2px solid var(--rule);}
+.hl td.wklabel{font-size:10.5px;color:var(--faint);line-height:1.3;padding:4px 4px 4px 0;vertical-align:top;}
+.hl td.wklabel b{display:block;color:var(--soft);font-weight:600;}
+.hl td.wkmiles{font-size:11.5px;text-align:right;padding:4px 0;vertical-align:top;line-height:1.35;}
 .hl .cell .dmark.done{color:var(--run);} .hl .cell .dmark.short{color:var(--lift);}
 .hl .cell .dmark.missed{color:var(--alert);} .hl .cell .dmark.extra{color:var(--sleep);}
 .hl .chatbox{max-height:280px;overflow-y:auto;margin-bottom:12px;display:flex;flex-direction:column;gap:8px;}
@@ -523,7 +536,8 @@ const CSS = `
 .hl .cell.raceday{outline:2px solid var(--alert);outline-offset:-2px;background:color-mix(in srgb, var(--alert) 8%, transparent);}
 .hl .cell.past{background:color-mix(in srgb, var(--paper) 60%, transparent);}
 .hl tr.pastweek td{opacity:.85;}
-@media(max-width:700px){.hl .cell{height:52px;padding:3px 2px;} .hl .cell .dsub{display:none;}}
+@media(max-width:700px){.hl .cell{height:56px;padding:3px 2px;} .hl .cell .dsub{display:none;}
+  .hl table.cal{min-width:600px;} .hl .cell .dtitle{font-size:11px;}}
 .hl .scorerow{display:grid;grid-template-columns:minmax(160px,210px) 1fr;gap:18px;align-items:start;}
 @media(max-width:700px){.hl .scorerow{grid-template-columns:1fr;}}
 .hl .rangebar{display:flex;justify-content:flex-end;margin:-6px 0 14px;}
@@ -2918,12 +2932,14 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
       }
       const plannedMi = round(sum(days.map((d) => d.plan?.miles || 0)), 1);
       const ranMi = round(sum(days.map((d) => d.ran || 0)), 1);
+      // a long range is mostly noise if weeks with nothing in them are kept
+      if (!plannedMi && !ranMi && weeksBack > 12 && monday < mondayOf(today)) continue;
       out.push({ monday, days, plannedMi, ranMi,
         longPlanned: Math.max(0, ...days.map((d) => d.plan?.miles || 0)) || null,
         longRan: Math.max(0, ...days.map((d) => d.ran || 0)) || null });
     }
     return out;
-  }, [startFrom, lastDate, daily, byDate, u, today]);
+  }, [startFrom, lastDate, daily, byDate, u, today, weeksBack]);
 
   const Setup = (
     <div className="panel">
@@ -2971,19 +2987,38 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
             ))}
           </span>
         </h2>
-        <div className="body" style={{ overflowX: "auto" }}>
+        <div className="body">
           <p className="note" style={{ marginBottom: 8 }}>
             Grey is what you ran; coloured is what the plan asks for. Tap any day to edit it, or drag one onto another to swap.
           </p>
+          <div className="calwrap">
           <table className="cal">
-            <thead><tr><th style={{ width: 58 }} />{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => <th key={d}>{d}</th>)}<th className="num" style={{ width: 62 }}>{u}</th></tr></thead>
+            <colgroup>
+              <col className="wkcol" />
+              {[0, 1, 2, 3, 4, 5, 6].map((i) => <col key={i} className="daycol" />)}
+              <col className="micol" />
+            </colgroup>
+            <thead><tr><th />{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => <th key={d}>{d}</th>)}<th>{u}</th></tr></thead>
             <tbody>
-              {grid.map((w) => {
+              {grid.map((w, wi) => {
                 const byDow = {};
                 for (const d of w.days) byDow[fromDayKey(d.date).getDay()] = d;
+                const mon = fromDayKey(w.monday);
+                const prev = wi > 0 ? fromDayKey(grid[wi - 1].monday) : null;
+                const newMonth = !prev || prev.getMonth() !== mon.getMonth();
                 return (
-                  <tr key={w.monday}>
-                    <td style={{ color: "var(--faint)", fontSize: 10.5 }}>{fmtShort(w.monday)}</td>
+                  <tr key={w.monday} className={newMonth ? "newmonth" : ""}>
+                    <td className="wklabel">
+                      {newMonth && <b>{mon.toLocaleDateString(undefined, { month: "short" })}</b>}
+                      {(() => {
+                        // weeks to race is more use here than repeating Monday's date
+                        if (!race.date) return mon.toLocaleDateString(undefined, { day: "numeric" });
+                        const wks = Math.round((fromDayKey(race.date) - mon) / 864e5 / 7);
+                        return wks > 0 ? <span>{wks}w out</span>
+                          : wks === 0 ? <span style={{ color: HEX.alert }}>race</span>
+                          : <span style={{ color: "var(--faint)" }}>{Math.abs(wks)}w ago</span>;
+                      })()}
+                    </td>
                     {[1, 2, 3, 4, 5, 6, 0].map((dow) => {
                       const d = byDow[dow];
                       if (!d) return <td key={dow} className="cell empty-cell" />;
@@ -3025,15 +3060,17 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
                         </td>
                       );
                     })}
-                    <td className="num" style={{ fontSize: 11.5 }}>
+                    <td className="wkmiles">
                       {w.plannedMi ? <div style={{ color: HEX.run }}>{w.plannedMi}</div> : null}
                       {w.ranMi ? <div style={{ color: "var(--faint)" }}>{w.ranMi}</div> : null}
+                      {!w.plannedMi && !w.ranMi ? <span style={{ color: "var(--faint)" }}>—</span> : null}
                     </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+          </div>
           <div className="legend">
             <span><i style={{ background: HEX.run }} />planned</span>
             <span><i style={{ background: HEX.rest }} />actually ran</span>

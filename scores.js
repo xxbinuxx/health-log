@@ -112,9 +112,12 @@ export function regenRaw(x, settings) {
 /* Training load, the way endurance coaches model it.
 
    Each day gets a load figure from distance and how fast it was relative to your own
-   median pace. Two exponentially weighted averages run over those: a slow one (42 days)
-   is fitness, a fast one (7 days) is fatigue. Stamina is the slow one, so a rest day
+   median pace. Two exponentially weighted averages run over those: a slow one (28 days)
+   is fitness, a fast one (5 days) is fatigue. Stamina is the slow one, so a rest day
    stops the clock rather than zeroing the score, and Freshness is fitness minus fatigue.
+
+   28 and 5 rather than the cycling-standard 42 and 7: a runner in a two-month block
+   wants the recent weeks to show, not to be diluted by what happened in the spring.
 
    Because it is already smoothed over weeks, Stamina is not passed through the four-day
    lag weighting that Regen and Degen use. */
@@ -135,20 +138,25 @@ export function trainingLoad(daily, settings, until) {
     // a faster-than-usual mile counts for more than an easy one, within reason
     const factor = dist && x.paceSecKm && medPace ? clamp((medPace / x.paceSecKm) ** 2, 0.7, 1.6) : 1;
     const load = dist * factor;
-    c += (load - c) / 42;
-    a += (load - a) / 7;
+    c += (load - c) / 28;
+    a += (load - a) / 5;
     ctl.set(k, c); atl.set(k, a);
   }
   return { ctl, atl, medPace };
 }
 
-/* Fitness expressed against your own weekly target: hitting the target lands near 70,
-   so there is headroom above it and the number means something on its own. */
-export function staminaFrom(ctlValue, settings) {
+/* Fitness on a fixed scale, so a reading today means the same thing as one next year
+   and no race or target is needed for it to make sense.
+
+   The underlying figure is a weekly-distance equivalent — the EWMA of daily load × 7.
+   100 on the scale is 70 of those a week, which is a serious runner's volume. */
+export const STAMINA_FULL_SCALE = 70;
+export function staminaWeekly(ctlValue) {
+  return ctlValue == null ? null : ctlValue * 7;
+}
+export function staminaFrom(ctlValue) {
   if (ctlValue == null) return null;
-  const perDay = (settings.weeklyDistanceTarget || 40) / 7;
-  if (!perDay) return null;
-  return clamp((ctlValue / perDay) * 70, 0, 100);
+  return clamp((staminaWeekly(ctlValue) / STAMINA_FULL_SCALE) * 100, 0, 100);
 }
 
 export function degenRaw(x) {
@@ -193,7 +201,8 @@ export function buildIndices(daily, dayKeys, settings) {
     return {
       date: k, label: fmtShort(k),
       regen: round(lagged(regen, k, false), 1),
-      run: c == null ? null : round(staminaFrom(c, settings), 1),
+      run: c == null ? null : round(staminaFrom(c), 1),
+      staminaWeekly: c == null ? null : round(staminaWeekly(c), 1),
       degen: round(lagged(degen, k, true), 1),
       fitness: c == null ? null : round(c, 2),
       fatigue: f == null ? null : round(f, 2),

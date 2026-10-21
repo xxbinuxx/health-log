@@ -1,5 +1,5 @@
 // Strava calls this: once to verify the address, then every time an activity changes.
-import { admin, env, freshToken, isRun, toSession, mergeSessions } from "./lib/shared.js";
+import { admin, env, freshToken, isRun, isLift, toSession, toLift, mergeSessions } from "./lib/shared.js";
 
 export async function handler(event) {
   // Verification handshake when the subscription is created.
@@ -40,9 +40,11 @@ export async function handler(event) {
     });
     const a = await r.json();
     if (!a || !a.id) return { statusCode: 200, body: "activity not readable" };
-    if (!isRun(a.sport_type || a.type)) return { statusCode: 200, body: "not a run" };
+    const t = a.sport_type || a.type;
+    const session = isRun(t) ? toSession(a) : isLift(t) ? toLift(a) : null;
+    if (!session) return { statusCode: 200, body: "not a run or a lift" };
 
-    await mergeSessions(db, row.user_id, [toSession(a)]);
+    await mergeSessions(db, row.user_id, [session]);
     return { statusCode: 200, body: "ok" };
   } catch (err) {
     console.error("strava-webhook", err);

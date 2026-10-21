@@ -5,6 +5,7 @@ import { supabase } from "./supabase";
 import { parseNotes } from "./notesImport";
 import { parseRocketMoney, resolveBuckets, spendByDay, SPEND_BUCKETS, DEFAULT_SPEND_SETTINGS } from "./spendImport";
 import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType, bestFromRaces, parseTime } from "./plan";
+import { MAJORS, windowStatus, actionable } from "./majors";
 import {
   pad, KM_PER_MI, toUnit, fromUnit, round, clamp, avg, sum,
   toDayKey, fromDayKey, addDays, mondayOf, dayKeyFor, lastNDays,
@@ -2359,6 +2360,16 @@ function TrainingDash({ sessions, days: dayRecs, doses, sleep, settings, setSett
   );
 }
 
+function RacesWrap({ doses, sleep, sessions, days, settings, setSettings }) {
+  const daily = useDaily({ doses, sleep, sessions, days, settings });
+  return (
+    <>
+      <Races settings={settings} setSettings={setSettings} daily={daily} />
+      <FindRaces settings={settings} setSettings={setSettings} />
+    </>
+  );
+}
+
 function CalendarWrap({ doses, sleep, sessions, days, settings, setSettings, planned, setPlanned }) {
   const daily = useDaily({ doses, sleep, sessions, days, settings });
   return <Calendar daily={daily} settings={settings} setSettings={setSettings} planned={planned} setPlanned={setPlanned} />;
@@ -2623,6 +2634,128 @@ function SpendImport({ spend, setSpend, settings }) {
   );
 }
 
+/* Finding races, and knowing when entry opens.
+
+   Two sources, deliberately: RunSignup's API for the thousands of ordinary road races,
+   queried live because their terms forbid keeping a copy; and a short curated list for
+   the majors, whose entry is lotteries and qualifying windows that no API exposes. */
+function FindRaces({ settings, setSettings }) {
+  const today = toDayKey(new Date());
+  const [tab, setTab] = useState("soon");
+  const [q, setQ] = useState({ distance: "marathon", zip: "11101", radius: "50", months: 12 });
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const known = new Set((settings.races || []).map((r) => `${r.date}|${(r.name || "").toLowerCase()}`));
+  const add = (r) => {
+    const row = { id: uid(), date: r.date, name: r.name, kind: r.kind || guessKind(r.distance || 26.2),
+      distanceMi: r.distanceMi ?? r.distance ?? raceType(r.kind).miles, goalTime: "", resultTime: "", notes: r.url || "" };
+    setSettings({ ...settings, races: [...(settings.races || []), row].sort((a, b) => (a.date < b.date ? 1 : -1)) });
+  };
+
+  const search = async () => {
+    setBusy(true); setErr(""); setRows(null);
+    try {
+      const to = addDays(today, Math.round(q.months * 30.44));
+      const p = new URLSearchParams({ from: today, to, distance: q.distance, zip: q.zip, radius: q.radius });
+      const j = await callFn(`/.netlify/functions/race-search?${p}`);
+      setRows(j.races || []);
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  const soon = actionable(today, { withinDays: 60 });
+
+  return (
+    <div className="panel">
+      <h2>Find races
+        <span className="seg" style={{ fontSize: 12 }}>
+          <button aria-pressed={tab === "soon"} onClick={() => setTab("soon")} style={{ padding: "3px 9px", fontSize: 12 }}>Entry opening</button>
+          <button aria-pressed={tab === "search"} onClick={() => setTab("search")} style={{ padding: "3px 9px", fontSize: 12 }}>Search</button>
+        </span>
+      </h2>
+      <div className="body">
+        {tab === "soon" ? (
+          <>
+            {!soon.length ? <p className="empty">No entry windows open or opening in the next two months.</p> : (
+              <table>
+                <thead><tr><th>Race</th><th>Entry</th><th className="num">Window</th><th /></tr></thead>
+                <tbody>
+                  {soon.map((m) => {
+                    const st = m.status;
+                    const colour = m.urgency === "closing" ? HEX.alert : m.urgency === "open" ? HEX.run : HEX.rest;
+                    return (
+                      <tr key={m.id}>
+                        <td>
+                          <a href={m.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)" }}>{m.name}</a>
+                          <div className="note" style={{ color: "var(--faint)" }}>{m.city} · {raceType(m.kind).name}{m.note ? ` — ${m.note}` : ""}</div>
+                        </td>
+                        <td><span className="pill">{m.entry}</span></td>
+                        <td className="num" style={{ color: colour, whiteSpace: "nowrap" }}>
+                          {st.state === "open" ? (st.closesIn <= 7 ? `closes in ${st.closesIn}d` : `open, ${st.closesIn}d left`) : `opens in ${st.opensIn}d`}
+                        </td>
+                        <td><button className="ghost" onClick={() => add({ date: `${fromDayKey(today).getFullYear() + (m.month < fromDayKey(today).getMonth() + 1 ? 1 : 0)}-${String(m.month).padStart(2, "0")}-01`, name: m.name, kind: m.kind, url: m.url })}>Track</button></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+            <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
+              Hand-maintained, because lotteries and qualifying windows are not in any public API. Dates shift year to year —
+              check the official page before you rely on one. "Track" adds it with a placeholder date you can correct.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="row">
+              <label className="f" style={{ width: 118 }}>Distance
+                <select value={q.distance} onChange={(e) => setQ({ ...q, distance: e.target.value })}>
+                  <option value="any">Any</option>
+                  {Object.entries(RACE_TYPES).map(([k, t]) => <option key={k} value={k}>{t.name}</option>)}
+                  <option value="ultra">Ultra</option>
+                </select>
+              </label>
+              <label className="f" style={{ width: 92 }}>Near ZIP<input value={q.zip} onChange={(e) => setQ({ ...q, zip: e.target.value })} /></label>
+              <label className="f" style={{ width: 92 }}>Within (mi)<input value={q.radius} inputMode="numeric" onChange={(e) => setQ({ ...q, radius: e.target.value })} /></label>
+              <label className="f" style={{ width: 104 }}>Next (months)<input value={q.months} inputMode="numeric" onChange={(e) => setQ({ ...q, months: Number(e.target.value) || 12 })} /></label>
+              <button className="solid" onClick={search} disabled={busy}>{busy ? "Searching…" : "Search"}</button>
+            </div>
+            {err && <p className="note flag" style={{ marginTop: 10 }}>{err}</p>}
+            {rows && !rows.length && <p className="empty">Nothing found. Widen the radius or the distance.</p>}
+            {rows && rows.length > 0 && (
+              <table style={{ marginTop: 12 }}>
+                <thead><tr><th>Date</th><th>Race</th><th>Where</th><th className="num">{settings.distanceUnit}</th><th /></tr></thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.id}>
+                      <td style={{ whiteSpace: "nowrap" }}>{r.date ? fmtShort(r.date) : "—"}</td>
+                      <td><a href={r.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)" }}>{r.name}</a>
+                        {r.eventName && <div className="note" style={{ color: "var(--faint)" }}>{r.eventName}</div>}</td>
+                      <td style={{ color: "var(--soft)" }}>{[r.city, r.state].filter(Boolean).join(", ")}</td>
+                      <td className="num">{r.distance ? round(r.distance, 1) : ""}</td>
+                      <td>
+                        {known.has(`${r.date}|${(r.name || "").toLowerCase()}`)
+                          ? <span className="note ok">added</span>
+                          : <button className="ghost" onClick={() => add(r)}>Add</button>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
+              Live from RunSignup, which covers most US road races. Nothing is stored — their terms ask that their
+              data is not copied, so every search goes to them fresh.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* Every race, past and future. Past ones with a result become the thing that predicts
    your next one; the soonest future one is what the plan is built toward. */
 function Races({ settings, setSettings, daily, onPickTarget }) {
@@ -2657,7 +2790,7 @@ function Races({ settings, setSettings, daily, onPickTarget }) {
         if (mi < 3) continue;
         const sec = sess.movingSec || (sess.paceSecPerKm ? sess.paceSecPerKm * sess.distanceKm : null);
         out.push({ date, name: (sess.name || "Race").slice(0, 44), distanceMi: round(mi, 2),
-          resultTime: sec ? secsToClock(sec) : "", kind: guessKind(mi) });
+          resultTime: sec ? secsToClock(sec) : "", kind: guessKind(mi), status: "entered" });
       }
     }
     return out.sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 8);
@@ -2869,8 +3002,10 @@ function PlanChat({ settings, setSettings, planned, setPlanned }) {
 function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
   const today = toDayKey(new Date());
   // the soonest future race in the list is what the plan is built toward
-  const races = settings.races || [];
-  const target = races.filter((r) => r.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1))[0] || null;
+  // only a race you have actually entered shapes training or appears on the grid
+  const races = (settings.races || []).filter((r) => r.status === "entered" || r.date < today);
+  const target = races.filter((r) => r.date >= today && r.status === "entered")
+    .sort((a, b) => (a.date < b.date ? -1 : 1))[0] || null;
   const race = target ? { name: target.name, date: target.date, kind: target.kind, goalTime: target.goalTime } : {};
   const goalSec = parseGoalTime(race.goalTime);
   const ready = !!(race.date && goalSec && race.date >= today);
@@ -2982,14 +3117,19 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
           )}
           {hasPlan && <span className="note">{(planned || []).filter((d) => d.edited).length} day{(planned || []).filter((d) => d.edited).length === 1 ? "" : "s"} edited by hand</span>}
         </div>
-        {!ready && <p className="note flag" style={{ marginTop: 8 }}>Add an upcoming race with a goal time and the plan can be generated.</p>}
+        {!ready && (
+          <p className="note flag" style={{ marginTop: 8 }}>
+            {(settings.races || []).some((r) => r.date >= today)
+              ? "You have races on the shortlist but none marked as entered. Mark one entered on the Races tab, give it a goal time, and the plan can be generated."
+              : "Add a race on the Races tab, mark it entered and give it a goal time, and the plan appears here."}
+          </p>
+        )}
       </div>
     </div>
   );
 
   return (
     <>
-      <Races settings={settings} setSettings={setSettings} daily={daily} />
       {Setup}
       {hasPlan && <PlanChat settings={settings} setSettings={setSettings} planned={planned} setPlanned={setPlanned} />}
 
@@ -3974,6 +4114,8 @@ function withDefaults(st) {
   if (s.planStart === undefined) s.planStart = null;
   if (!Array.isArray(s.planAdjust)) s.planAdjust = [];
   if (!Array.isArray(s.races)) s.races = [];
+  // races saved before statuses existed were all ones he had entered
+  s.races = s.races.map((r) => (r.status ? r : { ...r, status: "entered" }));
   if (!Array.isArray(s.planSwaps)) s.planSwaps = [];
   s.planPrefs = { ...DEFAULT_PREFS, ...(s.planPrefs || {}) };
   if (!Array.isArray(s.planPrefs.longRunDays) || !s.planPrefs.longRunDays.length) s.planPrefs.longRunDays = DEFAULT_PREFS.longRunDays;
@@ -4079,12 +4221,12 @@ export default function HealthLog({ email, onSignOut }) {
   const resetAll = () => { setDoses([]); setSleep([]); setManualSessions([]); setLifts([]); setDays([]); setSpend([]); setPlanned([]); setSettings(DEFAULT_SETTINGS); };
   const goLog = (k) => { setDayKey(k); setTab("log"); };
 
-  const nextRace = (settings.races || []).filter((r) => r.date >= toDayKey(new Date()))
+  const nextRace = (settings.races || []).filter((r) => r.date >= toDayKey(new Date()) && r.status === "entered")
     .sort((a, b) => (a.date < b.date ? -1 : 1))[0] || null;
   const raceDate = nextRace ? fromDayKey(nextRace.date) : null;
   const daysOut = raceDate ? Math.ceil((raceDate - new Date()) / 864e5) : null;
 
-  const tabs = [["log", "Log"], ["overview", "Overview"], ["sleep", "Sleep"], ["training", "Training"], ["intake", "Intake"], ["calendar", "Calendar"], ["spend", "Spend"], ["data", "Data"]];
+  const tabs = [["log", "Log"], ["overview", "Overview"], ["sleep", "Sleep"], ["training", "Training"], ["intake", "Intake"], ["calendar", "Calendar"], ["races", "Races"], ["spend", "Spend"], ["data", "Data"]];
 
   if (!loaded) {
     return <div className={`hl t-${theme}`}><style>{CSS}</style><div className="wrap"><p className="note">Opening your log…</p></div></div>;
@@ -4132,6 +4274,11 @@ export default function HealthLog({ email, onSignOut }) {
         {tab === "sleep" && <Boundary where="Sleep"><SleepDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
         {tab === "training" && <Boundary where="Training"><TrainingDash sessions={sessions} days={days} doses={doses} sleep={sleep} settings={settings} setSettings={setSettings} range={range} /></Boundary>}
         {tab === "intake" && <Boundary where="Intake"><IntakeDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
+        {tab === "races" && (
+          <Boundary where="Races">
+            <RacesWrap doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} setSettings={setSettings} />
+          </Boundary>
+        )}
         {tab === "calendar" && (
           <Boundary where="The calendar">
             <CalendarWrap doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} setSettings={setSettings}

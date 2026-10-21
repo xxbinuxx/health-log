@@ -35,7 +35,7 @@ Rules:
 - Only edit dates in the calendar you are shown. Never invent dates.
 - When the person writes "set exactly", apply their numbers as given. They have thought about it; do not substitute your own.
 - Race day cannot be changed or moved.
-- The last three weeks before the race are a taper: mileage comes down there, never up. Do not add long runs inside it.
+- The last three weeks before the race are a taper: each week's total should be lower than the week before. Taper weeks still contain long runs — just shorter ones, typically stepping down from the peak. Setting a 14 and then a 10 inside the taper is correct and you should allow it. What you must not do is let taper mileage climb.
 - No long run more than 4 miles beyond the longest already planned or run before it.
 - A long run should not exceed about 60% of its week.
 - Return an empty operations list when they are only asking a question.

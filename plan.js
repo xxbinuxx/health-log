@@ -27,6 +27,42 @@ export const RACE_TYPES = {
 };
 export const raceType = (k) => RACE_TYPES[k] || RACE_TYPES.marathon;
 
+/* Seconds from "3:20:38" or "20:30". */
+export function parseTime(v) {
+  if (!v) return null;
+  const p = String(v).trim().split(":").map(Number);
+  if (p.some(isNaN)) return null;
+  if (p.length === 3) return p[0] * 3600 + p[1] * 60 + p[2];
+  if (p.length === 2) return p[0] * 60 + p[1];
+  return null;
+}
+
+/* Best equivalent time for a target distance, from every race you have a result for.
+   A race loses a little predictive value as it ages, because the fitness behind it fades. */
+export function bestFromRaces(races = [], targetMiles, todayKey) {
+  const now = todayKey ? fromDayKey(todayKey) : new Date();
+  const all = [];
+  for (const r of races) {
+    const sec = parseTime(r.resultTime);
+    const mi = Number(r.distanceMi) || RACE_TYPES[r.kind]?.miles;
+    if (!sec || !mi || !r.date) continue;
+    const months = (now - fromDayKey(r.date)) / (30.44 * 864e5);
+    if (months < 0) continue;                         // hasn't happened yet
+    let pred = riegel(sec, mi, targetMiles);
+    // a race fades as the fitness behind it does
+    if (months > 6) pred *= 1 + Math.min(0.08, (months - 6) * 0.005);
+    all.push({ ...r, seconds: sec, miles: mi, months: round(months, 1), predicted: pred,
+      tooShort: mi < targetMiles * 0.35 });
+  }
+  /* A maximal 5K says what your legs can do for twenty minutes, not for three hours.
+     Extrapolating a marathon from one flatters anyone who has not done the long runs,
+     so only races of at least about a third of the distance are allowed to predict. */
+  const usable = all.filter((r) => !r.tooShort);
+  const pool = usable.length ? usable : all;
+  const best = pool.reduce((a, b) => (!a || b.predicted < a.predicted ? b : a), null);
+  return best ? { ...best, considered: all } : null;
+}
+
 /* Riegel: a time over one distance predicts another. The 1.06 exponent is the
    usual value; it flatters people who have not done the long runs, so treat a
    prediction from a short race as optimistic. */
@@ -219,7 +255,7 @@ export function historyWeeks(daily, settings, fromKey, toKey) {
 }
 
 /* Current form, read from the log rather than assumed. */
-export function currentForm(daily, settings, todayKey, T, goalSeconds, priorRace) {
+export function currentForm(daily, settings, todayKey, T, goalSeconds, priorRace, races = []) {
   const u = settings.distanceUnit || "mi";
   const hist = trainingHistory(daily, settings, todayKey, 16);
   const fit = assessFitness(daily, settings, todayKey);
@@ -233,7 +269,7 @@ export function currentForm(daily, settings, todayKey, T, goalSeconds, priorRace
   const trend = before ? round(((recent - before) / before) * 100, 0) : null;
   const consistency = hist.length ? round((hist.slice(-8).filter((h) => h.miles > 0).length / Math.min(8, hist.length)) * 100, 0) : null;
 
-  const predicted = predictFrom(fit, priorRace, T.miles);
+  const predicted = predictFrom(fit, priorRace, T.miles, races, todayKey);
   const ambition = predicted.seconds && goalSeconds ? (predicted.seconds - goalSeconds) / goalSeconds : null;
   const need = volumeFor(T, ambition);
 
@@ -308,7 +344,7 @@ export const DEFAULT_PREFS = {
 
 /* A prior race is a far better predictor than any training run, so it wins when present.
    settings.priorRace = { time: "3:20:00", distanceMi: 26.2, date: "2025-03-09" } */
-export function predictFrom(fit, priorRace, targetMiles = MARATHON_MI) {
+export function predictFrom(fit, priorRace, targetMiles = MARATHON_MI, races = [], todayKey = null) {
   const fromTraining = fit.best ? riegel(fit.best.seconds, fit.best.miles, targetMiles) : null;
   let fromRace = null;
   if (priorRace?.time) {
@@ -323,6 +359,12 @@ export function predictFrom(fit, priorRace, targetMiles = MARATHON_MI) {
         if (months > 12) fromRace *= 1 + Math.min(0.06, (months - 12) * 0.004);
       }
     }
+  }
+  // a logged race result beats both
+  const r = bestFromRaces(races, targetMiles, todayKey);
+  if (r) {
+    return { seconds: fromTraining ? Math.min(r.predicted, fromTraining * 1.03) : r.predicted,
+      basis: `${r.name || "your race"} on ${r.date}`, fromRace: r.predicted, fromTraining, race: r };
   }
   if (fromRace && fromTraining) return { seconds: Math.min(fromRace, fromTraining * 1.02), basis: "prior race", fromRace, fromTraining };
   if (fromRace) return { seconds: fromRace, basis: "prior race", fromRace, fromTraining };
@@ -420,7 +462,7 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
   const T = raceType(raceKind || settings.race?.kind || "marathon");
   const P0 = { ...DEFAULT_PREFS, ...(settings.planPrefs || {}), ...(prefs || {}) };
   if (P0.twentyTarget == null || P0.twentyTarget === "") P0.twentyTarget = T.bigTarget;
-  const form = currentForm(daily, settings, todayKey, T, goalSeconds, settings.priorRace);
+  const form = currentForm(daily, settings, todayKey, T, goalSeconds, settings.priorRace, settings.races || []);
   const fit = form.fit;
   const predicted = form.predicted;
 
@@ -629,8 +671,8 @@ function assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T, 
   if (predicted.seconds) {
     const gap = (predicted.seconds - goalSeconds) / goalSeconds;
     verdict = gap <= -0.02 ? "comfortable" : gap <= 0.02 ? "realistic" : gap <= 0.06 ? "a stretch" : "ambitious on current form";
-    if (predicted.basis === "prior race") {
-      notes.push(`Working from your prior race, the equivalent today is about ${secsToClock(predicted.seconds)}.`);
+    if (predicted.race) {
+      notes.push(`From ${predicted.race.name || "your race"} (${predicted.race.resultTime} over ${round(predicted.race.miles, 1)}, ${predicted.race.months} months ago), the equivalent today is about ${secsToClock(predicted.seconds)}.`);
       if (predicted.fromTraining) notes.push(`Your recent training alone would predict ${secsToClock(predicted.fromTraining)}, so the race history is doing the heavy lifting.`);
     } else {
       notes.push(`Predicted from your best long run: about ${secsToClock(predicted.seconds)}.`);

@@ -82,7 +82,7 @@ const KIND_META = {
 };
 const KIND_ORDER = ["caffeine", "alcohol", "cannabis", "nicotine", "stimulant"];
 
-const RUN_TYPES = ["easy", "long", "tempo", "intervals", "race", "trail"];
+const RUN_TYPES = ["easy", "long", "tempo", "intervals", "race", "trail", "hike"];
 const LIFT_TYPES = ["push", "pull", "legs", "upper", "lower", "full body"];
 /* Three palettes. Light and dark use Okabe-Ito hues; high contrast goes neon on black.
    All three keep blue / green / magenta apart, which survives every common colour blindness. */

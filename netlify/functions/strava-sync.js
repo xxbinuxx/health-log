@@ -1,5 +1,5 @@
 // Catch-up sync: pull runs on demand, in pages, so a full history works as well as a recent top-up.
-import { admin, freshToken, isRun, isLift, toSession, toLift, mergeSessions, json, userFromRequest } from "./lib/shared.js";
+import { admin, freshToken, isRun, isLift, isHike, toSession, toLift, toHike, mergeSessions, json, userFromRequest } from "./lib/shared.js";
 
 export async function handler(event) {
   try {
@@ -31,6 +31,7 @@ export async function handler(event) {
       for (const a of list) {
         const t = a.sport_type || a.type;
         if (isRun(t)) runs.push(toSession(a));
+        else if (isHike(t)) runs.push(toHike(a));     // hikes count toward volume
         else if (isLift(t)) runs.push(toLift(a));     // gym sessions land as lifts
       }
       if (list.length < 200) break;

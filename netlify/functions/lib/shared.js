@@ -66,6 +66,27 @@ function inferRunType(name, distKm, sportType) {
 export const isRun = (t) => /run|jog|trail|treadmill/i.test(t || "");
 /* Strava's own gym activity types, so lifts stop needing to be logged by hand. */
 export const isLift = (t) => /weight ?training|workout|crossfit/i.test(t || "");
+/* Hiking is real aerobic load — time on feet, and descending is specific preparation
+   for a downhill race — so it counts toward volume. Its pace is not comparable to
+   running pace, so it is imported without one and stays out of the pace medians. */
+export const isHike = (t) => /hike|walk|snowshoe/i.test(t || "");
+
+export function toHike(a) {
+  const local = String(a.start_date_local || a.start_date || "");
+  const distKm = (a.distance || 0) / 1000;
+  return {
+    id: `strava-${a.id}`,
+    date: local.slice(0, 10),
+    ts: new Date(a.start_date || local).getTime(),
+    kind: "run", type: "hike",
+    name: String(a.name || "Hike").slice(0, 80),
+    distanceKm: Math.round(distKm * 1000) / 1000,
+    movingSec: a.moving_time || a.elapsed_time || null,
+    paceSecPerKm: null,
+    elevationGain: a.total_elevation_gain ?? null,
+    note: "", source: "strava",
+  };
+}
 
 function inferLiftType(name) {
   const s = String(name || "").toLowerCase();

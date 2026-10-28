@@ -5,7 +5,7 @@ import { supabase } from "./supabase";
 import { parseNotes } from "./notesImport";
 import { parseRocketMoney, resolveBuckets, spendByDay, SPEND_BUCKETS, DEFAULT_SPEND_SETTINGS } from "./spendImport";
 import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType, bestFromRaces, parseTime } from "./plan";
-import { MAJORS, windowStatus, actionable } from "./majors";
+import { RACE_WINDOWS, nextOpening, openingSoon, openingInstant, icsFor } from "./majors";
 import {
   pad, KM_PER_MI, toUnit, fromUnit, round, clamp, avg, sum,
   toDayKey, fromDayKey, addDays, mondayOf, dayKeyFor, lastNDays,
@@ -2366,6 +2366,7 @@ function RacesWrap({ doses, sleep, sessions, days, settings, setSettings }) {
     <>
       <Races settings={settings} setSettings={setSettings} daily={daily} />
       <FindRaces settings={settings} setSettings={setSettings} />
+      <RegistrationKit settings={settings} setSettings={setSettings} />
     </>
   );
 }
@@ -2634,6 +2635,107 @@ function SpendImport({ spend, setSpend, settings }) {
   );
 }
 
+/* What you need at hand the moment entry opens. Hunting for a member number is where
+   the seconds go, so this keeps it one tap from the clipboard. */
+function RegistrationKit({ settings, setSettings }) {
+  const k = settings.regKit || {};
+  const set = (patch) => setSettings({ ...settings, regKit: { ...k, ...patch } });
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState("");
+
+  const fields = [
+    ["nyrrId", "NYRR member number"], ["dob", "Date of birth"], ["shirt", "Shirt size"],
+    ["emergencyName", "Emergency contact"], ["emergencyPhone", "Their phone"],
+    ["estFinish", "Estimated finish"], ["club", "Running club"],
+  ];
+  const copy = async (label, value) => {
+    try { await navigator.clipboard.writeText(value); setCopied(label); setTimeout(() => setCopied(""), 1400); } catch {}
+  };
+
+  return (
+    <div className="panel">
+      <h2>Registration details
+        <button className="del" onClick={() => setOpen(!open)} style={{ fontSize: 12 }}>{open ? "done" : "edit"}</button>
+      </h2>
+      <div className="body">
+        {open ? (
+          <>
+            <div className="row">
+              {fields.map(([f, label]) => (
+                <label key={f} className="f" style={{ width: 150 }}>{label}
+                  <input value={k[f] || ""} onChange={(e) => set({ [f]: e.target.value })} />
+                </label>
+              ))}
+            </div>
+            <p className="note" style={{ marginTop: 8, color: "var(--faint)" }}>
+              Stored with the rest of your settings. Nothing sensitive belongs here — no passwords, no card details.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="chips">
+              {fields.filter(([f]) => k[f]).map(([f, label]) => (
+                <button key={f} className="tchip" onClick={() => copy(label, k[f])}>
+                  {label}: <b style={{ color: "var(--ink)" }}>{k[f]}</b>{copied === label ? " ✓" : ""}
+                </button>
+              ))}
+            </div>
+            {!fields.some(([f]) => k[f]) && (
+              <p className="empty">Nothing saved yet. Tap edit and fill in what every registration form asks for.</p>
+            )}
+            <p className="note" style={{ marginTop: 8, color: "var(--faint)" }}>
+              Tap any of these to copy it. Have your browser's autofill switched on for address and card — that is where the rest of the time goes.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* A countdown to the exact minute, with the page one tap away once it is live. */
+function OpeningCountdown({ w }) {
+  const target = useMemo(() => openingInstant(w.status.opensOn, w.time), [w.status.opensOn, w.time]);
+  const [now, setNow] = useState(() => Date.now());
+  const close = target && target - now < 36e5 * 36;           // tick only when it is near
+
+  useEffect(() => {
+    if (!close) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [close]);
+
+  if (!target) return null;
+  const live = w.status.state === "open" || now >= target.getTime();
+  const left = Math.max(0, target.getTime() - now);
+  const hh = Math.floor(left / 36e5), mm = Math.floor((left % 36e5) / 6e4), ss = Math.floor((left % 6e4) / 1000);
+
+  const addToCalendar = () => {
+    const ics = icsFor(w, w.status.opensOn, w.time);
+    if (!ics) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([ics], { type: "text/calendar" }));
+    a.download = `${w.id}-entry-opens.ics`;
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      {live ? (
+        <a className="solid" href={w.url} target="_blank" rel="noreferrer"
+           style={{ textDecoration: "none", padding: "7px 14px", display: "inline-block", borderRadius: 3 }}>
+          Register now
+        </a>
+      ) : close ? (
+        <span className="pill" style={{ background: HEX.alert, color: "var(--paper)", fontVariantNumeric: "tabular-nums" }}>
+          {hh}h {String(mm).padStart(2, "0")}m {String(ss).padStart(2, "0")}s
+        </span>
+      ) : null}
+      <button className="ghost" onClick={addToCalendar}>Add alarm</button>
+    </div>
+  );
+}
+
 /* Finding races, and knowing when entry opens.
 
    Two sources, deliberately: RunSignup's API for the thousands of ordinary road races,
@@ -2665,37 +2767,56 @@ function FindRaces({ settings, setSettings }) {
     finally { setBusy(false); }
   };
 
-  const soon = actionable(today, { withinDays: 60 });
+  const soon = openingSoon(today, { withinDays: 365 });
 
   return (
     <div className="panel">
       <h2>Find races
         <span className="seg" style={{ fontSize: 12 }}>
-          <button aria-pressed={tab === "soon"} onClick={() => setTab("soon")} style={{ padding: "3px 9px", fontSize: 12 }}>Entry opening</button>
+          <button aria-pressed={tab === "soon"} onClick={() => setTab("soon")} style={{ padding: "3px 9px", fontSize: 12 }}>When entry opens</button>
           <button aria-pressed={tab === "search"} onClick={() => setTab("search")} style={{ padding: "3px 9px", fontSize: 12 }}>Search</button>
         </span>
       </h2>
       <div className="body">
         {tab === "soon" ? (
           <>
-            {!soon.length ? <p className="empty">No entry windows open or opening in the next two months.</p> : (
+            {!soon.length ? <p className="empty">Nothing opening in the next year.</p> : (
               <table>
-                <thead><tr><th>Race</th><th>Entry</th><th className="num">Window</th><th /></tr></thead>
+                <thead><tr><th className="num" style={{ width: 128 }}>Entry opens</th><th>Race</th><th>How it goes</th><th /></tr></thead>
                 <tbody>
-                  {soon.map((m) => {
-                    const st = m.status;
-                    const colour = m.urgency === "closing" ? HEX.alert : m.urgency === "open" ? HEX.run : HEX.rest;
+                  {soon.map((w) => {
+                    const st = w.status;
+                    const fast = w.speed === "minutes" || w.speed === "hours";
+                    const colour = st.state === "open" ? HEX.run : fast && st.daysUntilOpen <= 30 ? HEX.alert : "var(--soft)";
                     return (
-                      <tr key={m.id}>
+                      <tr key={w.id}>
+                        <td className="num" style={{ whiteSpace: "nowrap", color: colour }}>
+                          {st.state === "open" ? (
+                            <><b>open now</b><div className="note" style={{ color: "var(--faint)" }}>{st.daysLeft}d left</div></>
+                          ) : (
+                            <>
+                              <b>{st.daysUntilOpen}d</b>
+                              <div className="note" style={{ color: "var(--faint)" }}>
+                                {fmtDayLabel(st.opensOn)}{w.time ? `, ${w.time}` : ""}
+                              </div>
+                            </>
+                          )}
+                        </td>
                         <td>
-                          <a href={m.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)" }}>{m.name}</a>
-                          <div className="note" style={{ color: "var(--faint)" }}>{m.city} · {raceType(m.kind).name}{m.note ? ` — ${m.note}` : ""}</div>
+                          <a href={w.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)" }}>{w.name}</a>
+                          <div className="note" style={{ color: "var(--faint)" }}>
+                            {w.city} · opens {w.lead} ahead
+                            {w.confidence === "typical" ? " · date from past years, confirm on the site" : " · date confirmed"}
+                          </div>
+                          {w.note && <div className="note" style={{ color: "var(--faint)" }}>{w.note}</div>}
                         </td>
-                        <td><span className="pill">{m.entry}</span></td>
-                        <td className="num" style={{ color: colour, whiteSpace: "nowrap" }}>
-                          {st.state === "open" ? (st.closesIn <= 7 ? `closes in ${st.closesIn}d` : `open, ${st.closesIn}d left`) : `opens in ${st.opensIn}d`}
+                        <td style={{ whiteSpace: "nowrap" }}>
+                          <span className="pill" style={fast ? { background: HEX.alert, color: "var(--paper)" } : undefined}>
+                            {w.speed === "minutes" ? "gone in minutes" : w.speed === "lottery" ? "lottery" : w.speed === "days" ? "days" : w.speed}
+                          </span>
+                          <div className="note" style={{ color: "var(--faint)" }}>{w.entry}</div>
                         </td>
-                        <td><button className="ghost" onClick={() => add({ date: `${fromDayKey(today).getFullYear() + (m.month < fromDayKey(today).getMonth() + 1 ? 1 : 0)}-${String(m.month).padStart(2, "0")}-01`, name: m.name, kind: m.kind, url: m.url })}>Track</button></td>
+                        <td><OpeningCountdown w={w} /></td>
                       </tr>
                     );
                   })}
@@ -2703,8 +2824,11 @@ function FindRaces({ settings, setSettings }) {
               </table>
             )}
             <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
-              Hand-maintained, because lotteries and qualifying windows are not in any public API. Dates shift year to year —
-              check the official page before you rely on one. "Track" adds it with a placeholder date you can correct.
+              Sorted by when entry opens, because that is the date that costs you a year if you miss it.
+              "Add alarm" puts the exact minute in your calendar with reminders a day and fifteen minutes before;
+              within 36 hours the row counts down live and the button becomes a direct link.
+              Anything marked "gone in minutes" gets a warning 30, 14, 7, 3 and 1 days ahead in your morning email;
+              everything else at 14, 7 and 1. Dates marked as coming from past years move a little each year — check the link.
             </p>
           </>
         ) : (

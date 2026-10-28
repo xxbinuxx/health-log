@@ -3,6 +3,7 @@ import {
   addDays, lastNDays, mondayOf, toUnit, round, avg, sum, median, relToMedian,
   secsToClock, minsToHM, buildIndices, rollup,
 } from "../../../scores.js";
+import { alerts as raceAlerts } from "../../../majors.js";
 
 const pct = (v) => (v == null ? null : Math.round(v));
 
@@ -134,6 +135,8 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
   }
 
   const nudges = [];
+  // a lottery you miss costs a year, so this is worth a line
+  for (const a of raceAlerts(todayKey)) nudges.push(a.message);
   if (!loggedYesterday) nudges.push("Nothing is logged for yesterday yet.");
   if (yd.sleep && yd.sleep.score == null) nudges.push("Last night's sleep score is missing.");
 
@@ -143,6 +146,29 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
     scores: { regen: pct(now.regen), run: pct(now.run), degen: pct(now.degen), rel },
   };
 }
+
+/* Everything the writer is allowed to see. Numbers only, already computed. */
+export function briefFacts(b, extra = {}) {
+  return {
+    scores: b.scores,
+    plan: b.plan,
+    reason: b.why,
+    facts: b.lines,
+    nudges: b.nudges,
+    ...extra,
+  };
+}
+
+export const WRITER_SYSTEM = `You write a short daily training note for one person, from numbers someone else has already computed.
+
+Rules, in order of importance:
+1. Never invent, estimate or recompute a number. Use only the figures given to you, exactly as given. If a figure is absent, do not mention that topic.
+2. Keep the recommendation you are given. You may rephrase it; you may not change what it advises.
+3. Three or four sentences. Plain, direct, like a training partner who has seen the data. No greeting, no sign-off, no bullet points, no emoji.
+4. Do not moralise about drinking or cannabis. Report what the numbers say and what it means for running. Never suggest the reader is unwell or diagnose anything.
+5. Vary the opening between days. Do not start with "Today" or "Your".
+
+Write the note and nothing else.`;
 
 export function briefText(b, siteUrl) {
   return [
@@ -154,6 +180,24 @@ export function briefText(b, siteUrl) {
     "",
     siteUrl || "",
   ].filter((x) => x !== undefined).join("\n");
+}
+
+/* The model's prose slots in where the fixed sentences were; everything else is unchanged. */
+export function briefTextWritten(prose, b, siteUrl) {
+  return [prose, ...(b.nudges.length ? ["", ...b.nudges] : []), "", siteUrl || ""].filter((x) => x !== undefined).join("\n");
+}
+
+export function briefHtmlWritten(prose, b, siteUrl) {
+  const esc = (t) => String(t).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+  return `<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#0D1B30;max-width:520px">
+  <div style="font-size:19px;font-weight:600;color:#12345E;margin-bottom:12px">${esc(b.plan)}</div>
+  <div>${esc(prose).replace(/\n/g, "<br>")}</div>
+  <div style="margin:16px 0;padding:10px 12px;background:#EEF2F7;font-size:13px;color:#3D5171">
+    ${b.lines.map(esc).join("<br>")}
+  </div>
+  ${b.nudges.length ? `<div style="color:#D55E00">${b.nudges.map(esc).join("<br>")}</div>` : ""}
+  <div style="margin-top:18px"><a href="${siteUrl}" style="color:#0072B2">Open the log</a></div>
+</div>`;
 }
 
 export function briefHtml(b, siteUrl) {

@@ -781,26 +781,51 @@ function WellnessDash({ wellness, sleep, sessions, doses, days, settings, range 
   );
 }
 
-/* Connection status, and a button that finds out what your account actually returns. */
+/* Connection status, a test that shows what Garmin actually answered, and a backfill that
+   works in slices so no single request can run long enough to be cut off. */
 function GarminPanel() {
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState("");
   const [state, setState] = useState(null);
+  const [progress, setProgress] = useState(null);
 
-  useEffect(() => {
-    (async () => {
-      const { data: u } = await supabase.auth.getUser();
-      if (!u?.user) return;
-      const { data } = await supabase.from("hl_store").select("value").eq("user_id", u.user.id).eq("key", "hl2:garminState").maybeSingle();
-      setState(data?.value || null);
-    })();
-  }, [msg]);
+  const loadState = async () => {
+    const { data: u } = await supabase.auth.getUser();
+    if (!u?.user) return;
+    const { data } = await supabase.from("hl_store").select("value").eq("user_id", u.user.id).eq("key", "hl2:garminState").maybeSingle();
+    setState(data?.value || null);
+  };
+  useEffect(() => { loadState(); }, []);
 
-  const run = async (label, path) => {
-    setBusy(label); setMsg(null);
-    try { setMsg({ ok: true, data: await callFn(path) }); }
+  const call = (qs) => callFn(`/.netlify/functions/garmin-sync?${qs}`);
+
+  const test = async () => {
+    setBusy("probe"); setMsg(null);
+    try { setMsg({ ok: true, data: await call("days=3&dry=1") }); }
     catch (e) { setMsg({ ok: false, text: String(e.message || e) }); }
     finally { setBusy(""); }
+  };
+  const sync = async () => {
+    setBusy("sync"); setMsg(null);
+    try { setMsg({ ok: true, data: await call("days=14") }); await loadState(); }
+    catch (e) { setMsg({ ok: false, text: String(e.message || e) }); await loadState(); }
+    finally { setBusy(""); }
+  };
+  // 56-day slices, newest first, so each call is short and a failure keeps what came before
+  const backfill = async (totalDays) => {
+    setBusy("all"); setMsg(null);
+    try {
+      let rows = 0;
+      for (let before = 0; before < totalDays; before += 56) {
+        setProgress({ done: before, of: totalDays });
+        const r = await call(`days=56&before=${before}`);
+        rows += Object.values(r.report || {}).reduce((a, v) => a + (v.rows || 0), 0);
+        if (r.partial) { setMsg({ ok: false, text: `Garmin slowed down at ${before} days back. ${rows} rows were saved; run it again to continue from the start.` }); break; }
+      }
+      setMsg((m) => m || { ok: true, summary: `Pulled ${Math.round(totalDays / 365 * 10) / 10} years. ${rows} rows read.` });
+      await loadState();
+    } catch (e) { setMsg({ ok: false, text: String(e.message || e) }); }
+    finally { setBusy(""); setProgress(null); }
   };
 
   const last = state?.at ? new Date(state.at) : null;
@@ -810,35 +835,45 @@ function GarminPanel() {
     <div className="panel">
       <h2>Garmin <span className="hint">{last ? `last synced ${ago < 1 ? "just now" : ago < 48 ? `${ago}h ago` : `${Math.round(ago / 24)}d ago`}` : "not synced yet"}</span></h2>
       <div className="body">
+        {state?.authFailed && (
+          <p className="note flag" style={{ marginBottom: 10 }}>
+            Garmin rejected your key — it has expired or been deleted. Make a new one at connect.garmin.com/app/settings/personalApiToken
+            and replace <b>GARMIN_PERSONAL_API_KEY</b> in Netlify, then deploy.
+          </p>
+        )}
         <div className="row" style={{ gap: 10 }}>
-          <button className="solid" onClick={() => run("sync", "/.netlify/functions/garmin-sync?days=14")} disabled={!!busy}>
-            {busy === "sync" ? "Syncing…" : "Sync last 14 days"}
+          <button className="solid" onClick={sync} disabled={!!busy}>{busy === "sync" ? "Syncing…" : "Sync last 14 days"}</button>
+          <button className="ghost" onClick={() => { if (confirm("Pull up to three years of history, in slices? Takes a minute or two.")) backfill(1095); }} disabled={!!busy}>
+            {busy === "all" && progress ? `Pulling… ${progress.done}/${progress.of} days` : "Pull history"}
           </button>
-          <button className="ghost" onClick={() => { if (confirm("Pull everything Garmin has? This can take a minute.")) run("all", "/.netlify/functions/garmin-sync?days=1095"); }} disabled={!!busy}>
-            {busy === "all" ? "Pulling everything…" : "Pull everything"}
-          </button>
-          <button className="ghost" onClick={() => run("probe", "/.netlify/functions/garmin-sync?days=3&dry=1")} disabled={!!busy}>
-            {busy === "probe" ? "Probing…" : "Test connection"}
-          </button>
+          <button className="ghost" onClick={test} disabled={!!busy}>{busy === "probe" ? "Testing…" : "Test connection"}</button>
         </div>
-        {msg && !msg.ok && <p className="note flag" style={{ marginTop: 10 }}>{msg.text}</p>}
-        {msg?.ok && (
-          <table style={{ marginTop: 12 }}>
-            <thead><tr><th>Data</th><th className="num">Rows</th><th>Answered at</th></tr></thead>
-            <tbody>
-              {Object.entries(msg.data.report || {}).map(([k, v]) => (
-                <tr key={k}>
-                  <td>{k}</td>
-                  <td className="num" style={{ color: v.rows ? HEX.run : HEX.alert }}>{v.rows}</td>
-                  <td style={{ color: "var(--faint)", fontSize: 11.5 }}>{v.path || `nothing answered after ${v.attempts} tries`}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {msg && !msg.ok && msg.text && <p className="note flag" style={{ marginTop: 10 }}>{msg.text}</p>}
+        {msg?.ok && msg.summary && <p className="note ok" style={{ marginTop: 10 }}>{msg.summary}</p>}
+        {msg?.ok && msg.data?.report && (
+          <>
+            <table style={{ marginTop: 12 }}>
+              <thead><tr><th>Data</th><th className="num">Rows</th><th>Garmin said</th><th>Fields it sent</th></tr></thead>
+              <tbody>
+                {Object.entries(msg.data.report).map(([k, v]) => (
+                  <tr key={k}>
+                    <td>{k}</td>
+                    <td className="num" style={{ color: v.rows ? HEX.run : HEX.alert }}>{v.rows}</td>
+                    <td style={{ color: "var(--faint)", fontSize: 11.5 }}>{v.error ? v.error : v.status || "ok"}</td>
+                    <td style={{ color: "var(--faint)", fontSize: 11, maxWidth: 340 }}>{(v.fields || []).slice(0, 12).join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="note" style={{ marginTop: 8, color: "var(--faint)" }}>
+              Took {msg.data.ms} ms{msg.data.partial ? " — Garmin was slow and the answer is incomplete" : ""}.
+              If a row shows 0 rows with a 404 or 400, copy its name and the fields column to me and the mapping is a one-line fix.
+            </p>
+          </>
         )}
         <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
-          Garmin's personal API is read-only and pull-only, so this runs on a schedule at 4am New York time rather than being pushed.
-          It fills gaps — a number you typed is never overwritten. If a row shows zero, that endpoint did not answer and the path list needs adjusting.
+          Garmin's personal API is read-only and pull-only, so this runs by itself at 4am New York time rather than being pushed.
+          It fills gaps and never overwrites something you typed. Your key expires on the date you chose when you made it.
         </p>
       </div>
     </div>
@@ -1049,7 +1084,8 @@ function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDos
     const rec = { date: dayKey, score: numOf(score), asleepMin: parseHours(hours), restingHr: numOf(rhr), bodyBattery: numOf(bb), bedtime: parseBedtime(bed) };
     const empty = Object.keys(rec).every((k) => k === "date" || rec[k] == null);
     if (empty && !sleepRec) return;
-    upsertSleep(rec);
+    // once you have touched a day, its values are yours; the watch only fills what is still blank
+    upsertSleep({ ...rec, _g: null });
   };
   const onEnter = (e) => { if (e.key === "Enter") e.currentTarget.blur(); };
 

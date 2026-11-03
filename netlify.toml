@@ -12,6 +12,11 @@
 [functions."daily-brief"]
   schedule = "0 10,11 * * *"
 
+# Garmin is pull-only, so something has to go and fetch. Early morning New York time, an
+# hour before the brief is written, so the email reads this morning's sleep.
+[functions."garmin-sync"]
+  schedule = "30 8,9 * * *"
+
 # Send every other path to the app so refreshing the page never 404s.
 [[redirects]]
   from = "/*"

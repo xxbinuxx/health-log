@@ -3,10 +3,11 @@ import {
   addDays, lastNDays, mondayOf, toUnit, round, avg, sum, median, relToMedian,
   secsToClock, minsToHM, buildIndices, rollup,
 } from "../../../scores.js";
+import { alerts as raceAlerts } from "../../../majors.js";
 
 const pct = (v) => (v == null ? null : Math.round(v));
 
-export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey) {
+export function buildBrief({ doses, sleep, sessions, days, settings, wellness = [] }, todayKey) {
   const s = { distanceUnit: "mi", weeklyDistanceTarget: 40, sleepHoursGoal: 7.5, dayStartHour: 4, ...settings };
   const u = s.distanceUnit;
   const daily = rollup({ doses, sleep, sessions, days, settings: s });
@@ -21,6 +22,15 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
 
   const y = addDays(todayKey, -1);
   const yd = daily.get(y);
+
+  // HRV against its own baseline: the best single recovery signal the watch offers, and a
+  // drop that holds for several nights says more than one bad one.
+  const hrvOf = (k) => wellness.find((w) => w.date === k)?.hrv ?? null;
+  const hrvWeek = lastNDays(5, y).map(hrvOf).filter((v) => v != null);
+  const hrvBase = lastNDays(28, addDays(y, -5)).map(hrvOf).filter((v) => v != null);
+  const hrvNow = hrvWeek.length >= 3 ? avg(hrvWeek) : null;
+  const hrvNorm = hrvBase.length >= 8 ? median(hrvBase) : null;
+  const hrvDrop = hrvNow != null && hrvNorm != null ? round(hrvNow - hrvNorm, 0) : null;
 
   // resting HR against its own recent baseline: a lift of a few beats is worth a mention
   const rhrOf = (k) => daily.get(k).sleep?.restingHr ?? null;
@@ -67,6 +77,9 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
       : (good ? ", near your lowest" : ", about as quiet as it gets");
     return `${r ?? raw}${r != null ? ` of 100` : ""}${word} (raw ${raw})`;
   };
+  if (hrvDrop != null && Math.abs(hrvDrop) >= 5) {
+    lines.push(`HRV has averaged ${Math.round(hrvNow)} ms over the last few nights, ${Math.abs(hrvDrop)} ${hrvDrop > 0 ? "above" : "below"} your usual ${Math.round(hrvNorm)}.`);
+  }
   if (rhrUp != null && Math.abs(rhrUp) >= 2) {
     lines.push(`Resting HR is averaging ${Math.round(rhrNow)} over the last week, ${Math.abs(rhrUp)} ${rhrUp > 0 ? "above" : "below"} your baseline of ${rhrNorm}.`);
   }
@@ -100,6 +113,9 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
   } else if (raceDays != null && raceDays >= 0 && raceDays <= 10) {
     plan = raceDays <= 2 ? "Shake-out only, 20 to 30 minutes." : raceDays <= 5 ? "Short and sharp, well short of exhaustion." : "Hold the volume down, keep one quality session in.";
     why = `${raceDays} day${raceDays === 1 ? "" : "s"} to ${s.race?.name || "race day"}.`;
+  } else if (hrvDrop != null && hrvDrop <= -8 && rhrUp != null && rhrUp >= 2) {
+    plan = "Easy, or take the day off.";
+    why = `HRV is ${Math.abs(hrvDrop)} below your usual and resting HR is ${rhrUp} up — two recovery signals pointing the same way.`;
   } else if (rhrUp != null && rhrUp >= 4) {
     plan = "Easy, or take the day off.";
     why = `Resting HR is ${rhrUp} beats above your baseline, which usually means fatigue or something coming on.`;
@@ -134,6 +150,8 @@ export function buildBrief({ doses, sleep, sessions, days, settings }, todayKey)
   }
 
   const nudges = [];
+  // a lottery you miss costs a year, so this is worth a line
+  for (const a of raceAlerts(todayKey)) nudges.push(a.message);
   if (!loggedYesterday) nudges.push("Nothing is logged for yesterday yet.");
   if (yd.sleep && yd.sleep.score == null) nudges.push("Last night's sleep score is missing.");
 

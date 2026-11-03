@@ -20,9 +20,38 @@ export const garminReady = () => !!env("GARMIN_PERSONAL_API_KEY");
 
 const JWT = /^eyJ[\w-]+\.[\w-]+\.[\w-]+$/;
 
+/* A token lasts 24 hours, so exchange once and reuse it while this instance stays warm.
+   Every extra request counts toward Garmin's limit, and the exchange was being paid for
+   on every call. Only the last few characters of the key are kept, to tell keys apart. */
+const tokenCache = { token: null, exp: 0, tag: "" };
+const jwtExp = (t) => { try { return JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString()).exp * 1000; } catch { return 0; } };
+
+/* Garmin sends no Retry-After, so a rate limit is reported as "unknown wait". */
+export class RateLimited extends Error {
+  constructor(retryAfter) { super("Garmin is rate-limiting this key."); this.rateLimited = true; this.retryAfter = retryAfter; }
+}
+
+/* Spaces out when each request STARTS, so a burst becomes a trickle. Requests may still
+   overlap in flight; it is the rate they begin at that gets counted. */
+export function makeGate(gapMs) {
+  let next = 0;
+  return (signal) => {
+    const now = Date.now(), at = Math.max(now, next);
+    next = at + gapMs;
+    const wait = at - now;
+    if (wait <= 0) return Promise.resolve();
+    return new Promise((res, rej) => {
+      const t = setTimeout(res, wait);
+      signal?.addEventListener("abort", () => { clearTimeout(t); const e = new Error("aborted"); e.name = "AbortError"; rej(e); }, { once: true });
+    });
+  };
+}
+
 /* The exchange returns a JWT, but the field it travels in is not documented, so look for it. */
 export async function getToken(signal) {
   if (!garminReady()) throw new Error("GARMIN_PERSONAL_API_KEY is not set in Netlify");
+  const tag = env("GARMIN_PERSONAL_API_KEY").slice(-6);
+  if (tokenCache.token && tokenCache.tag === tag && tokenCache.exp - Date.now() > 36e5) return tokenCache.token;
   let r, text;
   try {
     r = await fetch(TOKEN_URL, { method: "POST", headers: { Authorization: `ApiKey ${env("GARMIN_PERSONAL_API_KEY")}` }, signal });
@@ -35,7 +64,9 @@ export async function getToken(signal) {
     e.authFailed = true; throw e;
   }
   if (!r.ok) throw new Error(`Garmin's token service returned ${r.status}. Try again shortly.`);
-  if (JWT.test(text.trim())) return text.trim();
+  const remember = (t) => { tokenCache.token = t; tokenCache.exp = jwtExp(t); tokenCache.tag = tag; return t; };
+  if (r.status === 429) throw new RateLimited(null);
+  if (JWT.test(text.trim())) return remember(text.trim());
   let j = null;
   try { j = JSON.parse(text); } catch { /* not JSON */ }
   const hit = (o, depth = 0) => {
@@ -46,7 +77,7 @@ export async function getToken(signal) {
   };
   const token = hit(j);
   if (!token) throw new Error(`Garmin answered but no token was in it (${text.slice(0, 80).replace(/\s+/g, " ")})`);
-  return token;
+  return remember(token);
 }
 
 const d = (x) => x.toISOString().slice(0, 10);
@@ -56,14 +87,33 @@ const addD = (iso, n) => { const x = new Date(`${iso}T12:00:00Z`); x.setUTCDate(
    request covers; Garmin does not publish per-endpoint limits, so ranges are cut into
    windows and a 400 falls back to a smaller one. */
 export const ENDPOINTS = {
-  sleeps:      { url: (a, b) => `/sleep-service/sleep/dailySleepSummariesByDate?startDate=${a}&endDate=${b}`, window: 28 },
+  // limits below are what other developers report (steps and stress 28 days, sleep and body
+  // battery 31, HRV 365). Using the widest allowed window means the fewest requests, and
+  // every request counts against a limit Garmin does not publish.
+  sleeps:      { url: (a, b) => `/sleep-service/sleep/dailySleepSummariesByDate?startDate=${a}&endDate=${b}`, window: 31 },
   dailies:     { url: (a, b) => `/usersummary-service/v2/dailysummaries?startDate=${a}&endDate=${b}`, window: 28 },
   steps:       { url: (a, b) => `/usersummary-service/stats/steps/daily/${a}/${b}`, window: 28 },
   stress:      { url: (a, b) => `/usersummary-service/stats/stress/daily/${a}/${b}`, window: 28 },
-  hrv:         { url: (a, b) => `/hrv-service/hrv/daily/${a}/${b}`, window: 28 },
-  bodyBattery: { url: (a, b) => `/wellness-service/wellness/bodyBattery/reports/daily?startDate=${a}&endDate=${b}`, window: 28 },
-  weight:      { url: (a, b) => `/weight-service/weight/range/${a}/${b}?includeAll=true`, window: 28 },
+  hrv:         { url: (a, b) => `/hrv-service/hrv/daily/${a}/${b}`, window: 365 },
+  bodyBattery: { url: (a, b) => `/wellness-service/wellness/bodyBattery/reports/daily?startDate=${a}&endDate=${b}`, window: 31 },
+  weight:      { url: (a, b) => `/weight-service/weight/range/${a}/${b}?includeAll=true`, window: 180 },
 };
+
+/* The requests needed to cover a range, newest first. The browser walks this list one
+   request at a time, so the schedule has one author and cannot drift from the server. */
+export function planWindows(kinds, from, to) {
+  const out = [];
+  for (const kind of kinds) {
+    const w = ENDPOINTS[kind].window;
+    for (let b = to; b >= from; ) {
+      const a = addD(b, -(w - 1));
+      out.push({ kind, from: a < from ? from : a, to: b });
+      b = addD(a, -1);
+    }
+  }
+  // interleave kinds so a stop part-way leaves recent data of every kind, not all of one
+  return out.sort((x, y) => (x.to < y.to ? 1 : x.to > y.to ? -1 : 0));
+}
 // a single date, not a range — only the latest is useful
 export const FITNESS_AGE = (date) => `/fitnessage-service/fitnessage/v2/${date}`;
 
@@ -111,17 +161,21 @@ export function flat(r) {
 }
 
 /* One kind of data over a date range, in parallel windows, under a shared abort signal. */
-export async function pullKind(token, kind, from, to, signal) {
+export async function pullKind(token, kind, from, to, signal, gate) {
   const ep = ENDPOINTS[kind];
   const windows = [];
   for (let a = from; a <= to; a = addD(a, ep.window)) windows.push([a, addD(a, ep.window - 1) > to ? to : addD(a, ep.window - 1)]);
 
   const statuses = new Set();
-  let firstError = null;
+  let firstError = null, rateLimited = false, retryAfter = null;
   const call = async (a, b) => {
+    if (rateLimited) return [];                      // once limited, every further request only extends the wait
     try {
+      await gate?.(signal);
+      if (rateLimited) return [];
       const r = await fetch(`${BASE}${ep.url(a, b)}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" }, signal });
       statuses.add(r.status);
+      if (r.status === 429) { rateLimited = true; retryAfter = Number(r.headers?.get?.("retry-after")) || null; return []; }
       if (r.status === 401 || r.status === 403) { const e = new Error(`${r.status}`); e.authFailed = true; throw e; }
       if (r.status === 400 && b > a) {                    // window too wide: halve it
         const mid = addD(a, Math.floor((Date.parse(b) - Date.parse(a)) / 864e5 / 2));
@@ -140,13 +194,14 @@ export async function pullKind(token, kind, from, to, signal) {
   };
   const chunks = await Promise.all(windows.map(([a, b]) => call(a, b)));
   const rows = chunks.flat();
-  return { rows, statuses: [...statuses], error: rows.length ? null : firstError,
+  return { rows, statuses: [...statuses], error: rows.length ? null : firstError, rateLimited, retryAfter,
     sampleKeys: rows[0] ? Object.keys(flat(rows[0])).slice(0, 40) : [] };
 }
 
-export async function pullFitnessAge(token, date, signal) {
+export async function pullFitnessAge(token, date, signal, gate) {
   if (signal?.aborted) return { row: null, status: 0 };
   try {
+    await gate?.(signal);
     const r = await fetch(`${BASE}${FITNESS_AGE(date)}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" }, signal });
     if (!r.ok) return { row: null, status: r.status };
     const t = await r.text();

@@ -104,25 +104,12 @@ export async function syncOne(db, userId, { days = 14, before = 0, dry = false }
   } finally { clearTimeout(timer); }
 }
 
+// Called from the browser, so it must NOT carry a schedule: Netlify cannot invoke a
+// scheduled function by URL. The overnight run lives in garmin-nightly.js.
 export async function handler(event) {
   try {
     const q = event?.queryStringParameters || {};
     const db = admin();
-    const hasAuth = event?.headers?.authorization || event?.headers?.Authorization;
-
-    // the schedule calls with no user: do everyone who has connected
-    if (!hasAuth) {
-      if (!garminReady()) return json(200, { skipped: "GARMIN_PERSONAL_API_KEY not set" });
-      const { data: users } = await db.auth.admin.listUsers();
-      const out = [];
-      for (const u of users?.users || []) {
-        try { out.push({ user: u.email, ...(await syncOne(db, u.id, { days: 7 })) }); }
-        catch (e) { console.error("garmin-sync", u.email, e?.message); out.push({ user: u.email, error: String(e.message) }); }
-      }
-      console.log("garmin-sync: done", JSON.stringify(out.map((o) => ({ user: o.user, ms: o.ms, error: o.error }))));
-      return json(200, { results: out });
-    }
-
     const user = await userFromRequest(event, db);
     if (!user) return json(401, { error: "Not signed in." });
     if (!garminReady()) return json(503, { error: "Garmin is not connected: add GARMIN_PERSONAL_API_KEY in Netlify, then deploy." });

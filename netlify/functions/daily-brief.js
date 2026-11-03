@@ -3,7 +3,7 @@ import { admin, env, json } from "./lib/shared.js";
 import { buildBrief, briefText, briefHtml, briefFacts, briefTextWritten, briefHtmlWritten, WRITER_SYSTEM } from "./lib/brief.js";
 import { chat, groqReady, tryGroq } from "./lib/groq.js";
 
-const KEYS = { doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions", lifts: "hl2:lifts", days: "hl2:days", wellness: "hl2:wellness", settings: "hl2:settings" };
+const KEYS = { doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions", lifts: "hl2:lifts", days: "hl2:days", wellness: "hl2:wellness", garmin: "hl2:garminState", settings: "hl2:settings" };
 
 // the local date in New York, whatever the server thinks the time is
 function localParts(tz = "America/New_York") {
@@ -18,7 +18,7 @@ async function loadAll(db, userId) {
   return {
     doses: map[KEYS.doses] || [], sleep: map[KEYS.sleep] || [],
     sessions: map[KEYS.sessions] || [], days: map[KEYS.days] || [],
-    wellness: map[KEYS.wellness] || [], settings: map[KEYS.settings] || {},
+    wellness: map[KEYS.wellness] || [], garmin: map[KEYS.garmin] || null, settings: map[KEYS.settings] || {},
   };
 }
 
@@ -69,6 +69,8 @@ export async function runBrief(event = {}) {
       }
 
       const brief = buildBrief(state, date);
+      // a Garmin key made for 30 days stops working without a sound; say so in the email
+      if (state.garmin?.authFailed) brief.nudges.unshift("Your Garmin key has expired, so sleep is no longer filling in by itself. Make a new one at connect.garmin.com/app/settings/personalApiToken and replace GARMIN_PERSONAL_API_KEY in Netlify.");
       const site = env("URL") || "";
 
       // Let the model phrase it, but only from figures we computed. If it is unavailable

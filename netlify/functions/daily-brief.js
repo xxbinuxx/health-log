@@ -3,7 +3,7 @@ import { admin, env, json } from "./lib/shared.js";
 import { buildBrief, briefText, briefHtml, briefFacts, briefTextWritten, briefHtmlWritten, WRITER_SYSTEM } from "./lib/brief.js";
 import { chat, groqReady, tryGroq } from "./lib/groq.js";
 
-const KEYS = { doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions", lifts: "hl2:lifts", days: "hl2:days", settings: "hl2:settings" };
+const KEYS = { doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions", lifts: "hl2:lifts", days: "hl2:days", wellness: "hl2:wellness", settings: "hl2:settings" };
 
 // the local date in New York, whatever the server thinks the time is
 function localParts(tz = "America/New_York") {
@@ -18,7 +18,7 @@ async function loadAll(db, userId) {
   return {
     doses: map[KEYS.doses] || [], sleep: map[KEYS.sleep] || [],
     sessions: map[KEYS.sessions] || [], days: map[KEYS.days] || [],
-    settings: map[KEYS.settings] || {},
+    wellness: map[KEYS.wellness] || [], settings: map[KEYS.settings] || {},
   };
 }
 

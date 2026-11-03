@@ -23,7 +23,7 @@ import {
 
 const KEYS = {
   doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions",
-  lifts: "hl2:lifts", days: "hl2:days", spend: "hl2:spend", plan: "hl2:plan", settings: "hl2:settings",
+  lifts: "hl2:lifts", days: "hl2:days", spend: "hl2:spend", plan: "hl2:plan", wellness: "hl2:wellness", settings: "hl2:settings",
 };
 
 /* ================================================================== */
@@ -576,6 +576,275 @@ async function callFn(path, { method = "GET", body } = {}) {
   return j;
 }
 
+/* Stress, HRV, steps, sleep stages and weight — the things only the watch knows.
+
+   The question this answers is the one the rest of the app cannot: which of these signals
+   actually predicts how you run? Every correlation here is computed from your own days,
+   and every one is labelled with how many days it rests on, because thirty points will
+   produce a convincing-looking r that means nothing. */
+function WellnessDash({ wellness, sleep, sessions, doses, days, settings, range }) {
+  const daily = useDaily({ doses, sleep, sessions, days, settings });
+  const today = toDayKey(new Date());
+  const span = lastNDays(range, today);
+  const u = settings.distanceUnit;
+  const byDate = useMemo(() => new Map((wellness || []).map((w) => [w.date, w])), [wellness]);
+
+  const rows = span.map((k) => {
+    const w = byDate.get(k) || {};
+    const x = daily.get(k);
+    return { k, label: fmtShort(k), ...w, score: x.sleep?.score ?? null, rhr: x.sleep?.restingHr ?? null,
+      ranMi: x.runKm ? toUnit(x.runKm, u) : 0, pace: x.paceSecKm, alc: x.alc, thcMg: x.thcMg, hasRun: x.hasRun };
+  });
+  const have = (f) => rows.filter((r) => r[f] != null);
+  const avgOf = (f) => (have(f).length ? avg(have(f).map((r) => r[f])) : null);
+  const chartRows = bucketize(span, range).map((b) => {
+    const m = (f) => round(bucketAvg(b, (k) => rows.find((r) => r.k === k)?.[f] ?? null), 0);
+    return { label: b.label, hrv: m("hrv"), stress: m("stressAvg"), steps: m("steps"), deep: m("deepMin"), rem: m("remMin"),
+      bb: m("bodyBatteryHigh"), spo2: round(bucketAvg(b, (k) => rows.find((r) => r.k === k)?.spo2 ?? null), 1) };
+  });
+
+  const nothing = !(wellness || []).length;
+
+  /* ---- what predicts your running? ---- */
+  const runDays = rows.filter((r) => r.hasRun && r.pace);
+  const prevOf = (k) => byDate.get(addDays(k, -1)) || {};
+  const corr = (label, xf, yf, sign) => {
+    const pts = runDays.map((r) => ({ x: xf(r), y: yf(r) })).filter((p) => p.x != null && p.y != null);
+    if (pts.length < 8) return { label, n: pts.length, r: null };
+    return { label, n: pts.length, r: pearson(pts.map((p) => p.x), pts.map((p) => p.y)) };
+  };
+  const paceKm = (r) => r.pace;
+  const findings = [
+    corr("HRV the night before", (r) => prevOf(r.k).hrv, paceKm),
+    corr("Sleep score that morning", (r) => r.score, paceKm),
+    corr("Yesterday's average stress", (r) => prevOf(r.k).stressAvg, paceKm),
+    corr("Deep sleep the night before", (r) => prevOf(r.k).deepMin, paceKm),
+    corr("Body battery on waking", (r) => r.bodyBatteryHigh, paceKm),
+  ].filter((f) => f.r != null).sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
+  // for pace in seconds, a NEGATIVE correlation means more of the signal → faster
+  const meaning = (f) => {
+    const r = f.r, a = Math.abs(r);
+    const strength = a < 0.2 ? "no real link" : a < 0.4 ? "a weak link" : a < 0.6 ? "a moderate link" : "a strong link";
+    const dir = a < 0.2 ? "" : r < 0 ? " — higher means faster" : " — higher means slower";
+    return `${strength}${dir}`;
+  };
+
+  /* ---- stress against the next morning's recovery ---- */
+  const stressNext = rows.map((r) => ({ s: byDate.get(addDays(r.k, -1))?.stressAvg, bb: r.bodyBatteryHigh, rhr: r.rhr }))
+    .filter((p) => p.s != null && p.rhr != null);
+  const rStress = stressNext.length >= 8 ? pearson(stressNext.map((p) => p.s), stressNext.map((p) => p.rhr)) : null;
+
+  const lastN = [...(wellness || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 10);
+  const stepsAvg = avgOf("steps"), hrvAvg = avgOf("hrv"), stressAvg = avgOf("stressAvg"), spo2Avg = avgOf("spo2");
+
+  return (
+    <>
+      <GarminPanel />
+
+      {nothing ? (
+        <div className="panel"><div className="body">
+          <p className="empty">Nothing from Garmin yet. Connect it above, run a sync, and steps, stress, HRV and sleep stages appear here.</p>
+        </div></div>
+      ) : (
+        <>
+          <div className="panel">
+            <h2>From the watch <span className="hint">last {range} days · {have("steps").length} days with data</span></h2>
+            <div className="body">
+              <div className="grid4" style={{ gap: 12 }}>
+                <Stat v={stepsAvg != null ? Math.round(stepsAvg).toLocaleString() : null} l="steps / day" color={HEX.lift}
+                      sub={stepsAvg != null ? `${have("steps").filter((r) => r.steps >= settings.stepsGoal).length} days over ${settings.stepsGoal / 1000}k` : ""} />
+                <Stat v={hrvAvg != null ? Math.round(hrvAvg) : null} l="overnight HRV, ms" color={HEX.run}
+                      sub={hrvAvg != null && have("hrv").length > 6 ? (() => {
+                        const last7 = have("hrv").slice(-7), prior = have("hrv").slice(0, -7);
+                        if (!prior.length) return "";
+                        const d = round(avg(last7.map((r) => r.hrv)) - avg(prior.map((r) => r.hrv)), 0);
+                        return d === 0 ? "steady" : `${d > 0 ? "▲" : "▼"} ${Math.abs(d)} this week`;
+                      })() : ""} />
+                <Stat v={stressAvg != null ? Math.round(stressAvg) : null} l="average stress" color={HEX.rhr}
+                      sub={stressAvg != null ? (stressAvg < 26 ? "resting range" : stressAvg < 51 ? "low" : stressAvg < 76 ? "medium" : "high") : ""} />
+                <Stat v={spo2Avg != null ? `${round(spo2Avg, 1)}%` : null} l="blood oxygen, asleep" color={HEX.hours}
+                      sub={spo2Avg != null && spo2Avg < 92 ? "low — worth a doctor, not an app" : ""} />
+              </div>
+            </div>
+          </div>
+
+          <div className="grid2">
+            <div className="panel">
+              <h2>HRV and stress <span className="hint">per {bucketNoun(range)}</span></h2>
+              <div className="body" style={{ paddingTop: 8 }}>
+                <Chart h={200}>
+                  <ComposedChart data={chartRows} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+                    <CartesianGrid stroke={HEX.grid} vertical={false} />
+                    <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chartRows.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                    <YAxis yAxisId="h" tick={axisTick()} tickLine={false} axisLine={false} />
+                    <YAxis yAxisId="s" orientation="right" domain={[0, 100]} tick={axisTick()} tickLine={false} axisLine={false} />
+                    <Tooltip content={<Tip />} />
+                    <Line yAxisId="h" type="monotone" dataKey="hrv" name="HRV (ms)" stroke={HEX.run} strokeWidth={2.2} dot={false} connectNulls />
+                    <Line yAxisId="s" type="monotone" dataKey="stress" name="Stress" stroke={HEX.rhr} strokeWidth={1.8} strokeDasharray="5 3" dot={false} connectNulls />
+                  </ComposedChart>
+                </Chart>
+                <div className="legend">
+                  <span><i style={{ background: HEX.run }} />HRV, left — higher is more recovered</span>
+                  <span><i style={{ background: HEX.rhr }} />stress, right, dashed</span>
+                </div>
+              </div>
+            </div>
+            <div className="panel">
+              <h2>Steps <span className="hint">per {bucketNoun(range)}</span></h2>
+              <div className="body" style={{ paddingTop: 8 }}>
+                <Chart h={200}>
+                  <BarChart data={chartRows} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+                    <CartesianGrid stroke={HEX.grid} vertical={false} />
+                    <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chartRows.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                    <YAxis tick={axisTick()} tickLine={false} axisLine={false} tickFormatter={(v) => (v >= 1000 ? `${Math.round(v / 100) / 10}k` : v)} />
+                    <Tooltip content={<Tip fmt={(p) => Number(p.value).toLocaleString()} />} />
+                    <ReferenceLine y={settings.stepsGoal} stroke={HEX.lift} strokeDasharray="3 4" opacity={0.6} />
+                    <Bar dataKey="steps" name="Steps" fill={HEX.lift} radius={[2, 2, 0, 0]} />
+                  </BarChart>
+                </Chart>
+              </div>
+            </div>
+          </div>
+
+          {have("deepMin").length > 3 && (
+            <div className="panel">
+              <h2>Sleep stages <span className="hint">minutes per night</span></h2>
+              <div className="body" style={{ paddingTop: 8 }}>
+                <Chart h={190}>
+                  <BarChart data={chartRows} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+                    <CartesianGrid stroke={HEX.grid} vertical={false} />
+                    <XAxis dataKey="label" tick={axisTick()} interval={tickGap(chartRows.length)} tickLine={false} axisLine={{ stroke: HEX.rule }} />
+                    <YAxis tick={axisTick()} tickLine={false} axisLine={false} />
+                    <Tooltip content={<Tip fmt={(p) => `${p.value} min`} />} />
+                    <Bar dataKey="deep" name="Deep" stackId="a" fill={HEX.sleep} />
+                    <Bar dataKey="rem" name="REM" stackId="a" fill={HEX.hours} radius={[2, 2, 0, 0]} />
+                  </BarChart>
+                </Chart>
+                <div className="legend"><span><i style={{ background: HEX.sleep }} />deep</span><span><i style={{ background: HEX.hours }} />REM</span></div>
+              </div>
+            </div>
+          )}
+
+          <div className="panel">
+            <h2>What predicts how you run <span className="hint">each signal against pace on your running days</span></h2>
+            <div className="body">
+              {!findings.length ? (
+                <p className="empty">Needs at least eight running days with both the signal and a pace. Widen the range, or give it a few more weeks.</p>
+              ) : (
+                <table>
+                  <thead><tr><th>Signal</th><th className="num">Days</th><th className="num">r</th><th>Reading</th></tr></thead>
+                  <tbody>
+                    {findings.map((f) => (
+                      <tr key={f.label}>
+                        <td>{f.label}</td>
+                        <td className="num">{f.n}</td>
+                        <td className="num">{round(f.r, 2)}</td>
+                        <td style={{ color: Math.abs(f.r) >= 0.4 ? "var(--ink)" : "var(--soft)" }}>{meaning(f)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
+                Correlation, not cause — an easy day tends to follow a good night partly because you chose to run easy.
+                Anything resting on fewer than about thirty days is a hint, not a finding.
+                {rStress != null && ` Yesterday's stress against this morning's resting HR: r = ${round(rStress, 2)}.`}
+              </p>
+            </div>
+          </div>
+
+          <div className="panel">
+            <h2>Recent days</h2>
+            <div className="body" style={{ overflowX: "auto" }}>
+              <table>
+                <thead><tr><th>Day</th><th className="num">Steps</th><th className="num">Stress</th><th className="num">HRV</th><th className="num">Deep</th><th className="num">REM</th><th className="num">SpO₂</th><th className="num">Weight</th></tr></thead>
+                <tbody>
+                  {lastN.map((w) => (
+                    <tr key={w.date}>
+                      <td>{fmtDayLabel(w.date)}</td>
+                      <td className="num">{w.steps != null ? Number(w.steps).toLocaleString() : "—"}</td>
+                      <td className="num">{w.stressAvg ?? "—"}</td>
+                      <td className="num">{w.hrv ?? "—"}</td>
+                      <td className="num">{w.deepMin != null ? `${w.deepMin}m` : "—"}</td>
+                      <td className="num">{w.remMin != null ? `${w.remMin}m` : "—"}</td>
+                      <td className="num">{w.spo2 != null ? `${w.spo2}%` : "—"}</td>
+                      <td className="num">{w.weightKg != null ? `${round(w.weightKg * 2.20462, 1)} lb` : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+/* Connection status, and a button that finds out what your account actually returns. */
+function GarminPanel() {
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [state, setState] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const { data: u } = await supabase.auth.getUser();
+      if (!u?.user) return;
+      const { data } = await supabase.from("hl_store").select("value").eq("user_id", u.user.id).eq("key", "hl2:garminState").maybeSingle();
+      setState(data?.value || null);
+    })();
+  }, [msg]);
+
+  const run = async (label, path) => {
+    setBusy(label); setMsg(null);
+    try { setMsg({ ok: true, data: await callFn(path) }); }
+    catch (e) { setMsg({ ok: false, text: String(e.message || e) }); }
+    finally { setBusy(""); }
+  };
+
+  const last = state?.at ? new Date(state.at) : null;
+  const ago = last ? Math.round((Date.now() - last.getTime()) / 36e5) : null;
+
+  return (
+    <div className="panel">
+      <h2>Garmin <span className="hint">{last ? `last synced ${ago < 1 ? "just now" : ago < 48 ? `${ago}h ago` : `${Math.round(ago / 24)}d ago`}` : "not synced yet"}</span></h2>
+      <div className="body">
+        <div className="row" style={{ gap: 10 }}>
+          <button className="solid" onClick={() => run("sync", "/.netlify/functions/garmin-sync?days=14")} disabled={!!busy}>
+            {busy === "sync" ? "Syncing…" : "Sync last 14 days"}
+          </button>
+          <button className="ghost" onClick={() => { if (confirm("Pull everything Garmin has? This can take a minute.")) run("all", "/.netlify/functions/garmin-sync?days=1095"); }} disabled={!!busy}>
+            {busy === "all" ? "Pulling everything…" : "Pull everything"}
+          </button>
+          <button className="ghost" onClick={() => run("probe", "/.netlify/functions/garmin-sync?days=3&dry=1")} disabled={!!busy}>
+            {busy === "probe" ? "Probing…" : "Test connection"}
+          </button>
+        </div>
+        {msg && !msg.ok && <p className="note flag" style={{ marginTop: 10 }}>{msg.text}</p>}
+        {msg?.ok && (
+          <table style={{ marginTop: 12 }}>
+            <thead><tr><th>Data</th><th className="num">Rows</th><th>Answered at</th></tr></thead>
+            <tbody>
+              {Object.entries(msg.data.report || {}).map(([k, v]) => (
+                <tr key={k}>
+                  <td>{k}</td>
+                  <td className="num" style={{ color: v.rows ? HEX.run : HEX.alert }}>{v.rows}</td>
+                  <td style={{ color: "var(--faint)", fontSize: 11.5 }}>{v.path || `nothing answered after ${v.attempts} tries`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
+          Garmin's personal API is read-only and pull-only, so this runs on a schedule at 4am New York time rather than being pushed.
+          It fills gaps — a number you typed is never overwritten. If a row shows zero, that endpoint did not answer and the path list needs adjusting.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /* One panel throwing must not take the whole app down — especially between deploys. */
 class Boundary extends React.Component {
   constructor(p) { super(p); this.state = { err: null }; }
@@ -926,7 +1195,11 @@ function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDos
       <div className="grid2">
         {/* ---------------- Sleep ---------------- */}
         <div className="panel">
-          <h2>Sleep <span className="hint">the night ending this morning</span></h2>
+          <h2>Sleep <span className="hint">
+            {sleepRec?.score != null && sleepRec?.asleepMin != null && sleepRec?.restingHr != null
+              ? <span style={{ color: HEX.run }}>filled in — from Garmin or by you</span>
+              : "the night ending this morning"}
+          </span></h2>
           <div className="body">
             <div className="row">
               <label className="f" style={{ width: 110 }}>Garmin score
@@ -4279,16 +4552,18 @@ export default function HealthLog({ email, onSignOut }) {
   const [days, setDays] = useState([]);
   const [spend, setSpend] = useState([]);
   const [planned, setPlanned] = useState([]);   // the training plan, once generated: editable records
+  const [wellness, setWellness] = useState([]);   // steps, stress, HRV, sleep stages — what Garmin supplies
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
   useEffect(() => {
     (async () => {
-      const [d, s, se, l, st, dy, sp, pl] = await Promise.all([
+      const [d, s, se, l, st, dy, sp, pl, wl] = await Promise.all([
         store.get(KEYS.doses), store.get(KEYS.sleep), store.get(KEYS.sessions),
         store.get(KEYS.lifts), store.get(KEYS.settings), store.get(KEYS.days), store.get(KEYS.spend),
-        store.get(KEYS.plan),
+        store.get(KEYS.plan), store.get(KEYS.wellness),
       ]);
       if (pl) setPlanned(pl);
+      if (wl) setWellness(wl);
       if (dy) setDays(dy);
       if (sp) setSpend(sp);
       if (d) setDoses(d);
@@ -4319,6 +4594,7 @@ export default function HealthLog({ email, onSignOut }) {
   useEffect(() => { save(KEYS.days, days); }, [days, save]);
   useEffect(() => { save(KEYS.spend, spend); }, [spend, save]);
   useEffect(() => { save(KEYS.plan, planned); }, [planned, save]);
+  // wellness is written by the server on a schedule; the browser only reads it, so no save-back
   useEffect(() => { save(KEYS.settings, settings); }, [settings, save]);
 
   // Strong sets become lift sessions unless a hand-logged lift already covers that day.
@@ -4350,7 +4626,7 @@ export default function HealthLog({ email, onSignOut }) {
   const raceDate = nextRace ? fromDayKey(nextRace.date) : null;
   const daysOut = raceDate ? Math.ceil((raceDate - new Date()) / 864e5) : null;
 
-  const tabs = [["log", "Log"], ["overview", "Overview"], ["sleep", "Sleep"], ["training", "Training"], ["intake", "Intake"], ["calendar", "Calendar"], ["races", "Races"], ["spend", "Spend"], ["data", "Data"]];
+  const tabs = [["log", "Log"], ["overview", "Overview"], ["sleep", "Sleep"], ["training", "Training"], ["intake", "Intake"], ["wellness", "Wellness"], ["calendar", "Calendar"], ["races", "Races"], ["spend", "Spend"], ["data", "Data"]];
 
   if (!loaded) {
     return <div className={`hl t-${theme}`}><style>{CSS}</style><div className="wrap"><p className="note">Opening your log…</p></div></div>;
@@ -4386,7 +4662,7 @@ export default function HealthLog({ email, onSignOut }) {
           ))}
         </nav>
 
-        {tab !== "log" && tab !== "data" && tab !== "calendar" && <RangeBar value={range} onChange={setRange} />}
+        {tab !== "log" && tab !== "data" && tab !== "calendar" && tab !== "races" && <RangeBar value={range} onChange={setRange} />}
 
         {tab === "log" && (
           <Boundary where="The log sheet">
@@ -4398,6 +4674,11 @@ export default function HealthLog({ email, onSignOut }) {
         {tab === "sleep" && <Boundary where="Sleep"><SleepDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
         {tab === "training" && <Boundary where="Training"><TrainingDash sessions={sessions} days={days} doses={doses} sleep={sleep} settings={settings} setSettings={setSettings} range={range} /></Boundary>}
         {tab === "intake" && <Boundary where="Intake"><IntakeDash doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} range={range} /></Boundary>}
+        {tab === "wellness" && (
+          <Boundary where="Wellness">
+            <WellnessDash wellness={wellness} sleep={sleep} sessions={sessions} doses={doses} days={days} settings={settings} range={range} />
+          </Boundary>
+        )}
         {tab === "races" && (
           <Boundary where="Races">
             <RacesWrap doses={doses} sleep={sleep} sessions={sessions} days={days} settings={settings} setSettings={setSettings} />

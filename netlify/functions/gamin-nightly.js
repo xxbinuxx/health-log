@@ -13,7 +13,9 @@ export async function runNightly(db) {
   const out = [];
   for (const u of users?.users || []) {
     try {
-      const r = await syncOne(db, u.id, { days: 7 });
+      // nobody is waiting on this one, so space requests out generously and allow most of the 30 seconds
+      const r = await syncOne(db, u.id, { days: 7, gapMs: 1800, deadlineMs: 26000 });
+      if (r.rateLimited) { console.log("garmin-nightly: rate limited, will try again tomorrow"); out.push({ user: u.email, rateLimited: true }); continue; }
       out.push({ user: u.email, ms: r.ms, rows: Object.values(r.report).reduce((a, v) => a + (v.rows || 0), 0), partial: r.partial });
     } catch (e) {
       console.error("garmin-nightly:", u.email, e?.message || e);

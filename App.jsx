@@ -6,6 +6,7 @@ import { parseNotes } from "./notesImport";
 import { parseRocketMoney, resolveBuckets, spendByDay, SPEND_BUCKETS, DEFAULT_SPEND_SETTINGS } from "./spendImport";
 import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType, bestFromRaces, parseTime } from "./plan";
 import { RACE_WINDOWS, nextOpening, openingSoon, openingInstant, icsFor } from "./majors";
+import { runBackfill, cooldownFor, estimate, DEFAULT_GAP_MS } from "./garminBackfill";
 import {
   pad, KM_PER_MI, toUnit, fromUnit, round, clamp, avg, sum,
   toDayKey, fromDayKey, addDays, mondayOf, dayKeyFor, lastNDays,
@@ -781,14 +782,24 @@ function WellnessDash({ wellness, sleep, sessions, doses, days, settings, range 
   );
 }
 
-/* Connection status, a test that shows what Garmin actually answered, and a backfill that
-   works in slices so no single request can run long enough to be cut off. */
+/* Connection status, a test that shows what Garmin actually answered, and a history pull that
+   goes one request at a time, stops the moment Garmin asks it to slow down, and picks up
+   exactly where it left off. Garmin publishes no limit, so the wait is a guess that grows. */
+const BF_KEY = "hl2:garminBackfill";
+const loadBf = () => { try { return JSON.parse(localStorage.getItem(BF_KEY) || "null"); } catch { return null; } };
+const saveBf = (v) => { try { v ? localStorage.setItem(BF_KEY, JSON.stringify(v)) : localStorage.removeItem(BF_KEY); } catch {} };
+
 function GarminPanel() {
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState("");
   const [state, setState] = useState(null);
-  const [progress, setProgress] = useState(null);
+  const [depth, setDepth] = useState(365);
+  const [bf, setBf] = useState(loadBf);                 // saved progress: {steps, next, strikes, cooldownUntil, rows, depth}
+  const [live, setLive] = useState(null);               // progress while running
+  const [now, setNow] = useState(Date.now());
+  const stopRef = useRef(false);
 
+  const persist = (v) => { setBf(v); saveBf(v); };
   const loadState = async () => {
     const { data: u } = await supabase.auth.getUser();
     if (!u?.user) return;
@@ -796,8 +807,14 @@ function GarminPanel() {
     setState(data?.value || null);
   };
   useEffect(() => { loadState(); }, []);
+  useEffect(() => {                                     // tick only while a cooldown is showing
+    if (!bf?.cooldownUntil || bf.cooldownUntil < Date.now()) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [bf?.cooldownUntil]);
 
   const call = (qs) => callFn(`/.netlify/functions/garmin-sync?${qs}`);
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const test = async () => {
     setBusy("probe"); setMsg(null);
@@ -807,29 +824,53 @@ function GarminPanel() {
   };
   const sync = async () => {
     setBusy("sync"); setMsg(null);
-    try { setMsg({ ok: true, data: await call("days=14") }); await loadState(); }
-    catch (e) { setMsg({ ok: false, text: String(e.message || e) }); await loadState(); }
+    try {
+      const d = await call("days=14");
+      setMsg(d.rateLimited ? { ok: false, text: "Garmin is rate-limiting this key. Wait about 15 minutes before syncing again; asking sooner only extends the wait." } : { ok: true, data: d });
+      await loadState();
+    } catch (e) { setMsg({ ok: false, text: String(e.message || e) }); await loadState(); }
     finally { setBusy(""); }
   };
-  // 56-day slices, newest first, so each call is short and a failure keeps what came before
-  const backfill = async (totalDays) => {
-    setBusy("all"); setMsg(null);
+
+  const walk = async (saved) => {
+    setBusy("all"); setMsg(null); stopRef.current = false;
+    const r = await runBackfill({
+      steps: saved.steps, start: saved.next, gapMs: DEFAULT_GAP_MS, sleep: wait,
+      shouldStop: () => stopRef.current,
+      call: (step) => call(`kind=${step.kind}&from=${step.from}&to=${step.to}`),
+      onStep: ({ i, total, step, rows }) => setLive({ i, total, step, rows: (saved.rows || 0) + rows }),
+    });
+    const rows = (saved.rows || 0) + (r.rows || 0);
+    if (r.status === "done") { persist(null); setMsg({ ok: true, summary: `Done. ${rows} rows read across ${saved.steps.length} requests.` }); }
+    else if (r.status === "rate_limited") {
+      const strikes = (saved.strikes || 0) + 1;
+      persist({ ...saved, next: r.next, rows, strikes, cooldownUntil: Date.now() + cooldownFor(strikes - 1) * 60000 });
+      setMsg({ ok: false, text: `Garmin asked us to slow down at request ${r.next + 1} of ${saved.steps.length}. Nothing is lost — it resumes from there.` });
+    } else if (r.status === "stopped") { persist({ ...saved, next: r.next, rows, strikes: saved.strikes || 0 }); setMsg({ ok: true, summary: `Paused at request ${r.next + 1} of ${saved.steps.length}.` }); }
+    else { persist({ ...saved, next: r.next, rows, strikes: saved.strikes || 0 }); setMsg({ ok: false, text: `Stopped at request ${r.next + 1}: ${r.error}. Nothing was skipped; resume tries that one again.` }); }
+    setLive(null); setBusy(""); await loadState();
+  };
+
+  const start = async () => {
+    setBusy("plan"); setMsg(null);
     try {
-      let rows = 0;
-      for (let before = 0; before < totalDays; before += 56) {
-        setProgress({ done: before, of: totalDays });
-        const r = await call(`days=56&before=${before}`);
-        rows += Object.values(r.report || {}).reduce((a, v) => a + (v.rows || 0), 0);
-        if (r.partial) { setMsg({ ok: false, text: `Garmin slowed down at ${before} days back. ${rows} rows were saved; run it again to continue from the start.` }); break; }
-      }
-      setMsg((m) => m || { ok: true, summary: `Pulled ${Math.round(totalDays / 365 * 10) / 10} years. ${rows} rows read.` });
-      await loadState();
-    } catch (e) { setMsg({ ok: false, text: String(e.message || e) }); }
-    finally { setBusy(""); setProgress(null); }
+      const plan = await call(`plan=1&days=${depth}`);
+      const saved = { steps: plan.steps, next: 0, rows: 0, strikes: 0, cooldownUntil: 0, depth };
+      persist(saved);
+      await walk(saved);
+    } catch (e) { setMsg({ ok: false, text: String(e.message || e) }); setBusy(""); }
+  };
+  const resume = async () => {
+    if (bf?.cooldownUntil > Date.now() && !confirm("Garmin asked for a pause and it has not finished. Asking now will probably be refused and extend the wait. Try anyway?")) return;
+    await walk({ ...bf, cooldownUntil: 0 });
   };
 
   const last = state?.at ? new Date(state.at) : null;
   const ago = last ? Math.round((Date.now() - last.getTime()) / 36e5) : null;
+  const cooling = bf?.cooldownUntil > now;
+  const left = cooling ? Math.ceil((bf.cooldownUntil - now) / 1000) : 0;
+  const clock = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  const sizes = { 90: 20, 365: 70, 1095: 202 };          // requests, from the server's own plan
 
   return (
     <div className="panel">
@@ -843,11 +884,52 @@ function GarminPanel() {
         )}
         <div className="row" style={{ gap: 10 }}>
           <button className="solid" onClick={sync} disabled={!!busy}>{busy === "sync" ? "Syncing…" : "Sync last 14 days"}</button>
-          <button className="ghost" onClick={() => { if (confirm("Pull up to three years of history, in slices? Takes a minute or two.")) backfill(1095); }} disabled={!!busy}>
-            {busy === "all" && progress ? `Pulling… ${progress.done}/${progress.of} days` : "Pull history"}
-          </button>
           <button className="ghost" onClick={test} disabled={!!busy}>{busy === "probe" ? "Testing…" : "Test connection"}</button>
         </div>
+
+        <div className="divline" />
+        <h3 style={{ margin: "0 0 8px", fontSize: 13 }}>History</h3>
+
+        {live && (
+          <div style={{ marginBottom: 10 }}>
+            <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.round((live.i / live.total) * 100)}%`, background: HEX.run }} /></div>
+            <p className="note" style={{ marginTop: 6 }}>
+              Request {live.i + 1} of {live.total} · {live.step.kind} · up to {live.step.to} · {live.rows} rows so far.
+              One every {DEFAULT_GAP_MS / 1000} seconds, on purpose.
+            </p>
+            <button className="ghost" onClick={() => { stopRef.current = true; }}>Pause after this one</button>
+          </div>
+        )}
+
+        {!live && bf && (
+          <div style={{ marginBottom: 10 }}>
+            <p className="note" style={{ color: "var(--ink)" }}>
+              {bf.next} of {bf.steps.length} requests done, {bf.rows} rows read.
+              {cooling ? <> Garmin asked for a pause. <b style={{ color: HEX.alert }}>Resume in {clock}</b>.</> : " Ready to continue."}
+            </p>
+            <div className="row" style={{ gap: 10, marginTop: 8 }}>
+              <button className="solid" onClick={resume} disabled={!!busy}>{cooling ? "Resume early" : "Resume"}</button>
+              <button className="ghost" onClick={() => { if (confirm("Discard this pull and start over?")) persist(null); }} disabled={!!busy}>Discard</button>
+            </div>
+            {(bf.strikes || 0) > 0 && <p className="note" style={{ marginTop: 6, color: "var(--faint)" }}>
+              Garmin has paused this {bf.strikes} time{bf.strikes === 1 ? "" : "s"}; each wait is longer than the last (15, then 30, then 60 minutes).
+            </p>}
+          </div>
+        )}
+
+        {!live && !bf && (
+          <div className="row" style={{ gap: 10, alignItems: "flex-end" }}>
+            <label className="f" style={{ width: 210 }}>How far back
+              <select value={depth} onChange={(e) => setDepth(Number(e.target.value))} disabled={!!busy}>
+                {[[90, "3 months"], [365, "1 year"], [1095, "3 years"]].map(([d, l]) => (
+                  <option key={d} value={d}>{l} · {sizes[d]} requests · {estimate(sizes[d]).label}</option>
+                ))}
+              </select>
+            </label>
+            <button className="ghost" onClick={start} disabled={!!busy}>{busy === "plan" ? "Planning…" : "Pull history"}</button>
+          </div>
+        )}
+
         {msg && !msg.ok && msg.text && <p className="note flag" style={{ marginTop: 10 }}>{msg.text}</p>}
         {msg?.ok && msg.summary && <p className="note ok" style={{ marginTop: 10 }}>{msg.summary}</p>}
         {msg?.ok && msg.data?.report && (
@@ -867,13 +949,13 @@ function GarminPanel() {
             </table>
             <p className="note" style={{ marginTop: 8, color: "var(--faint)" }}>
               Took {msg.data.ms} ms{msg.data.partial ? " — Garmin was slow and the answer is incomplete" : ""}.
-              If a row shows 0 rows with a 404 or 400, copy its name and the fields column to me and the mapping is a one-line fix.
+              If a row shows 0 rows with a 404 or 400, send me its name and the fields beside it and the mapping is a one-line fix.
             </p>
           </>
         )}
         <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
-          Garmin's personal API is read-only and pull-only, so this runs by itself at 4am New York time rather than being pushed.
-          It fills gaps and never overwrites something you typed. Your key expires on the date you chose when you made it.
+          Garmin publishes no rate limit and sends no warning before it applies one, so a long pull goes slowly and stops the
+          moment it is asked to. It fills gaps and never overwrites something you typed. Your key expires on the date you chose.
         </p>
       </div>
     </div>

@@ -19,11 +19,11 @@ import {
 const SLEEP = "hl2:sleep", WELL = "hl2:wellness", DAYS = "hl2:days", STATE = "hl2:garminState";
 const ALL_KINDS = Object.keys(ENDPOINTS);
 
-async function getKey(db, userId, key, fallback) {
+export async function getKey(db, userId, key, fallback) {
   const { data } = await db.from("hl_store").select("value").eq("user_id", userId).eq("key", key).maybeSingle();
   return data?.value ?? fallback;
 }
-async function setKey(db, userId, key, value) {
+export async function setKey(db, userId, key, value) {
   await db.from("hl_store").upsert({ user_id: userId, key, value, updated_at: new Date().toISOString() }, { onConflict: "user_id,key" });
 }
 

@@ -13,10 +13,14 @@
   schedule = "0 10,11 * * *"
 
 # Garmin is pull-only, so something has to go and fetch. This one is deliberately NOT garmin-sync,
-# which the browser calls: Netlify cannot invoke a scheduled function by URL. Early morning New York time, an
-# hour before the brief is written, so the email reads this morning's sleep.
+# which the browser calls: Netlify cannot invoke a scheduled function by URL.
+#
+# The aim is 11:00 New York time, once your sleep is done, then hourly until today's sleep has
+# landed. Cron is UTC and the New York offset changes twice a year, so this fires at every UTC hour
+# that could be 11:00-17:00 there (15:00-22:00 UTC covers both winter and summer) and the function
+# checks the New York clock itself. Most invocations stop immediately.
 [functions."garmin-nightly"]
-  schedule = "30 8,9 * * *"
+  schedule = "0 15-22 * * *"
 
 # Send every other path to the app so refreshing the page never 404s.
 [[redirects]]

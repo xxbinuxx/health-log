@@ -7,6 +7,7 @@ import { parseRocketMoney, resolveBuckets, spendByDay, SPEND_BUCKETS, DEFAULT_SP
 import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType, bestFromRaces, parseTime } from "./plan";
 import { RACE_WINDOWS, nextOpening, openingSoon, openingInstant, icsFor } from "./majors";
 import { runBackfill, cooldownFor, estimate, DEFAULT_GAP_MS } from "./garminBackfill";
+import { mergeRemoteByDate, changedFields } from "./mergeRemote";
 import {
   pad, KM_PER_MI, toUnit, fromUnit, round, clamp, avg, sum,
   toDayKey, fromDayKey, addDays, mondayOf, dayKeyFor, lastNDays,
@@ -816,16 +817,37 @@ function GarminPanel() {
   const call = (qs) => callFn(`/.netlify/functions/garmin-sync?${qs}`);
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  /* Body battery and weight are slow: in a test run they started last and were still waiting when
+     the seven-second budget ran out. So they go in their own requests, each with the full budget. */
+  const SLOW = ["bodyBattery", "weight"];
+  const runAll = async (days, dry) => {
+    const first = await call(`days=${days}&skip=${SLOW.join(",")}${dry ? "&dry=1" : ""}`);
+    const report = { ...first.report };
+    if (first.rateLimited) return { ...first, report };
+    const to = toDayKey(new Date()), from = addDays(to, -(days - 1));
+    let ms = first.ms || 0;
+    for (const k of SLOW) {
+      await wait(1500);                                  // keep the spacing Garmin seems to want
+      try {
+        const w = await call(`kind=${k}&from=${from}&to=${to}${dry ? "&dry=1" : ""}`);
+        if (w.rateLimited) { report[k] = { rows: 0, error: "rate limited" }; return { ...first, report, rateLimited: true }; }
+        report[k] = { rows: w.rows, status: w.status, ms: w.ms, error: w.failed ? w.error : null, fields: w.fields };
+        ms += w.ms || 0;
+      } catch (e) { report[k] = { rows: 0, error: String(e.message || e) }; }
+    }
+    return { ...first, report, ms };
+  };
+
   const test = async () => {
     setBusy("probe"); setMsg(null);
-    try { setMsg({ ok: true, data: await call("days=3&dry=1") }); }
+    try { setMsg({ ok: true, data: await runAll(3, true), dry: true }); }
     catch (e) { setMsg({ ok: false, text: String(e.message || e) }); }
     finally { setBusy(""); }
   };
   const sync = async () => {
     setBusy("sync"); setMsg(null);
     try {
-      const d = await call("days=14");
+      const d = await runAll(14, false);
       setMsg(d.rateLimited ? { ok: false, text: "Garmin is rate-limiting this key. Wait about 15 minutes before syncing again; asking sooner only extends the wait." } : { ok: true, data: d });
       await loadState();
     } catch (e) { setMsg({ ok: false, text: String(e.message || e) }); await loadState(); }
@@ -941,15 +963,18 @@ function GarminPanel() {
                   <tr key={k}>
                     <td>{k}</td>
                     <td className="num" style={{ color: v.rows ? HEX.run : HEX.alert }}>{v.rows}</td>
-                    <td style={{ color: "var(--faint)", fontSize: 11.5 }}>{v.error ? v.error : v.status || "ok"}</td>
-                    <td style={{ color: "var(--faint)", fontSize: 11, maxWidth: 340 }}>{(v.fields || []).slice(0, 12).join(", ")}</td>
+                    <td style={{ color: "var(--faint)", fontSize: 11.5, whiteSpace: "nowrap" }}>
+                      {v.error ? v.error : v.status || "ok"}{v.ms ? ` · ${(v.ms / 1000).toFixed(1)}s` : ""}
+                    </td>
+                    <td style={{ color: "var(--faint)", fontSize: 11, maxWidth: 520, whiteSpace: "normal", wordBreak: "break-word" }}>{(v.fields || []).join("  ")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
             <p className="note" style={{ marginTop: 8, color: "var(--faint)" }}>
-              Took {msg.data.ms} ms{msg.data.partial ? " — Garmin was slow and the answer is incomplete" : ""}.
-              If a row shows 0 rows with a 404 or 400, send me its name and the fields beside it and the mapping is a one-line fix.
+              {msg.dry ? "This was a test: nothing was saved. Press Sync last 14 days to save." : "Saved."}{" "}
+              Took {Math.round((msg.data.ms || 0) / 100) / 10}s{msg.data.partial ? " — Garmin was slow on some of it" : ""}.
+              If a row shows 0 rows, send me its name and the fields beside it and the mapping is a one-line fix.
             </p>
           </>
         )}
@@ -1163,11 +1188,13 @@ function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDos
   }, [dayKey, sleepRec?.score, sleepRec?.asleepMin, sleepRec?.restingHr, sleepRec?.bodyBattery, sleepRec?.bedtime]);
 
   const commitSleep = () => {
-    const rec = { date: dayKey, score: numOf(score), asleepMin: parseHours(hours), restingHr: numOf(rhr), bodyBattery: numOf(bb), bedtime: parseBedtime(bed) };
-    const empty = Object.keys(rec).every((k) => k === "date" || rec[k] == null);
-    if (empty && !sleepRec) return;
-    // once you have touched a day, its values are yours; the watch only fills what is still blank
-    upsertSleep({ ...rec, _g: null });
+    const next = { score: numOf(score), asleepMin: parseHours(hours), restingHr: numOf(rhr), bodyBattery: numOf(bb), bedtime: parseBedtime(bed) };
+    // hours are shown to two decimals, so 446 min reads back as 445.8: half a minute is not an edit
+    const changed = changedFields(next, sleepRec, { asleepMin: 0.5 });
+    if (!changed.length) return;          // leaving a box you did not touch writes nothing, so it cannot blank what Garmin filled in
+    const patch = Object.fromEntries(changed.map((k) => [k, k === "asleepMin" && next[k] != null ? Math.round(next[k]) : next[k]]));
+    // a field you set is yours from now on; every other field on the day keeps whatever it was
+    upsertSleep({ date: dayKey, ...patch, _g: (sleepRec?._g || []).filter((k) => !changed.includes(k)) });
   };
   const onEnter = (e) => { if (e.key === "Enter") e.currentTarget.blur(); };
 
@@ -1177,7 +1204,12 @@ function Log({ dayKey, setDayKey, doses, sleep, sessions, days, settings, addDos
   useEffect(() => { setNote(dayRec?.note ?? ""); setSteps(dayRec?.steps ?? ""); }, [dayKey, dayRec?.note, dayRec?.steps]);
   const tags = dayRec?.tags || [];
   const toggleTag = (t) => upsertDay({ date: dayKey, tags: tags.includes(t) ? tags.filter((x) => x !== t) : [...tags, t] });
-  const commitDay = () => upsertDay({ date: dayKey, note: note.trim(), steps: numOf(steps) });
+  const commitDay = () => {
+    const s = numOf(steps);
+    const stepsChanged = s !== (dayRec?.steps ?? null);
+    // steps are only written when you changed them, and only then do they stop being Garmin's
+    upsertDay({ date: dayKey, note: note.trim(), ...(stepsChanged ? { steps: s, _g: (dayRec?._g || []).filter((k) => k !== "steps") } : {}) });
+  };
   const dayDone = tags.length > 0 || !!dayRec?.note || dayRec?.steps != null;
 
   /* ---- workout draft ---- */
@@ -4697,6 +4729,7 @@ export default function HealthLog({ email, onSignOut }) {
 
   // save 600ms after the last change so a burst of taps becomes one write
   const timers = useRef({});
+  const quiet = useRef(0);        // "reset all" pauses the refresh below for a moment, or it would put the rows straight back
   const save = useCallback((k, v) => {
     if (!loaded) return;
     clearTimeout(timers.current[k]);
@@ -4713,6 +4746,27 @@ export default function HealthLog({ email, onSignOut }) {
   useEffect(() => { save(KEYS.spend, spend); }, [spend, save]);
   useEffect(() => { save(KEYS.plan, planned); }, [planned, save]);
   // wellness is written by the server on a schedule; the browser only reads it, so no save-back
+
+  /* The Garmin job writes sleep, wellness and steps while this tab may be open. Without this the
+     tab would never show them, and the next edit would save its stale copy over the top of them.
+     Re-read when the tab comes back into view and every five minutes, and merge by date. */
+  useEffect(() => {
+    if (!loaded) return;
+    const refresh = async () => {
+      if (document.visibilityState !== "visible" || Date.now() < quiet.current) return;
+      try {
+        const [sl, dy, wl] = await Promise.all([store.get(KEYS.sleep), store.get(KEYS.days), store.get(KEYS.wellness)]);
+        if (Date.now() < quiet.current) return;
+        if (sl) setSleep((cur) => mergeRemoteByDate(cur, sl));
+        if (dy) setDays((cur) => mergeRemoteByDate(cur, dy));
+        if (wl) setWellness((cur) => (JSON.stringify(cur) === JSON.stringify(wl) ? cur : wl));
+      } catch { /* offline or a blip: try again next time */ }
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    const t = setInterval(refresh, 5 * 60 * 1000);
+    return () => { document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); clearInterval(t); };
+  }, [loaded]);
   useEffect(() => { save(KEYS.settings, settings); }, [settings, save]);
 
   // Strong sets become lift sessions unless a hand-logged lift already covers that day.
@@ -4736,7 +4790,7 @@ export default function HealthLog({ email, onSignOut }) {
   const upsertDay = (rec) => setDays((x) => mergeBy(x, [rec], (r) => r.date));
   const addSession = (s) => setManualSessions((x) => [...x, s]);
   const removeSession = (id) => setManualSessions((x) => x.filter((s) => s.id !== id));
-  const resetAll = () => { setDoses([]); setSleep([]); setManualSessions([]); setLifts([]); setDays([]); setSpend([]); setPlanned([]); setSettings(DEFAULT_SETTINGS); };
+  const resetAll = () => { quiet.current = Date.now() + 4000; setDoses([]); setSleep([]); setManualSessions([]); setLifts([]); setDays([]); setSpend([]); setPlanned([]); setSettings(DEFAULT_SETTINGS); };
   const goLog = (k) => { setDayKey(k); setTab("log"); };
 
   const nextRace = (settings.races || []).filter((r) => r.date >= toDayKey(new Date()) && r.status === "entered")

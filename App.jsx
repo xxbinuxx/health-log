@@ -4,7 +4,7 @@ import { store } from "./storage";
 import { supabase } from "./supabase";
 import { parseNotes } from "./notesImport";
 import { parseRocketMoney, resolveBuckets, spendByDay, SPEND_BUCKETS, DEFAULT_SPEND_SETTINGS } from "./spendImport";
-import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType, bestFromRaces, parseTime } from "./plan";
+import { buildPlan, DEFAULT_PREFS, RACE_TYPES, raceType, bestFromRaces, parseTime, paceGuide, sessionPace } from "./plan";
 import { RACE_WINDOWS, nextOpening, openingSoon, openingInstant, icsFor } from "./majors";
 import { runBackfill, cooldownFor, estimate, DEFAULT_GAP_MS } from "./garminBackfill";
 import { mergeRemoteByDate, changedFields } from "./mergeRemote";
@@ -511,7 +511,7 @@ const CSS = `
 .hl table.cal thead th{position:sticky;top:0;z-index:2;background:var(--card);
   text-align:center;font-size:10.5px;padding:5px 2px;border-bottom:1px solid var(--rule);}
 .hl .cell{border:1px solid var(--rule-soft);padding:4px 3px;vertical-align:top;cursor:pointer;
-  height:62px;overflow:hidden;}
+  height:76px;overflow:hidden;}
 .hl .cell:hover{border-color:var(--rule);}
 .hl .cell.today{outline:2px solid var(--navy);outline-offset:-2px;}
 .hl .cell.empty-cell{background:var(--paper);cursor:default;}
@@ -520,6 +520,8 @@ const CSS = `
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .hl .cell .dsub{font-size:10px;color:var(--soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3;}
 .hl .cell .dmark{font-size:10px;margin-top:1px;line-height:1.2;white-space:nowrap;}
+.hl .cell .dpace{font-size:10px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink);font-variant-numeric:tabular-nums;}
+.hl .cell .dpace.guide{color:var(--faint);font-style:italic;}
 /* the first row of a new month gets a rule, so long ranges stay readable */
 .hl tr.newmonth td{border-top:2px solid var(--rule);}
 .hl td.wklabel{font-size:10.5px;color:var(--faint);line-height:1.3;padding:4px 4px 4px 0;vertical-align:top;}
@@ -539,7 +541,7 @@ const CSS = `
 .hl .cell.raceday{outline:2px solid var(--alert);outline-offset:-2px;background:color-mix(in srgb, var(--alert) 8%, transparent);}
 .hl .cell.past{background:color-mix(in srgb, var(--paper) 60%, transparent);}
 .hl tr.pastweek td{opacity:.85;}
-@media(max-width:700px){.hl .cell{height:56px;padding:3px 2px;} .hl .cell .dsub{display:none;}
+@media(max-width:700px){.hl .cell{height:62px;padding:3px 2px;} .hl .cell .dsub{display:none;}
   .hl table.cal{min-width:600px;} .hl .cell .dtitle{font-size:11px;}}
 .hl .scorerow{display:grid;grid-template-columns:minmax(160px,210px) 1fr;gap:18px;align-items:start;}
 @media(max-width:700px){.hl .scorerow{grid-template-columns:1fr;}}
@@ -3568,6 +3570,12 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
   const goalSec = parseGoalTime(race.goalTime);
   const ready = !!(race.date && goalSec && race.date >= today);
   const raceDates = useMemo(() => new Map(races.map((r) => [r.date, r])), [races]);
+  // pace is worked out from the goal when the screen is drawn, not stored in the plan, so it applies to days
+  // you set through the chat, follows the goal if you change it, and never needs the plan regenerated
+  const guide = useMemo(() => (goalSec ? paceGuide(goalSec, raceType(race.kind).miles, { races: settings.races || [], todayKey: today }) : null),
+    [goalSec, race.kind, settings.races, today]);
+  const clk = (sec) => secsToClock(Math.round((u === "km" ? sec / 1.609344 : sec)));
+  const clk5 = (sec) => secsToClock(Math.round((u === "km" ? sec / 1.609344 : sec) / 5) * 5);     // bands are shown to the nearest 5 s everywhere
   const [pick, setPick] = useState(null);
   const [drag, setDrag] = useState(null);
   const [edit, setEdit] = useState(null);
@@ -3758,6 +3766,7 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
                               {d.race.resultTime || d.race.goalTime || `${round(Number(d.race.distanceMi) || raceType(d.race.kind).miles, 1)} ${u}`}
                             </div>
                           )}
+                          {d.race && guide && d.race.date === race.date && <div className="dpace" style={{ color: HEX.alert }}>{clk(guide.race)}/{u}</div>}
                           {!d.race && d.plan && (
                             <div className="dtitle" style={{ color: d.plan.kind === "race" ? HEX.alert : d.plan.kind === "lift" ? HEX.lift : d.plan.kind === "rest" ? HEX.rest : HEX.run }}>
                               {d.plan.kind === "rest" && !d.plan.lift ? "rest" : d.plan.miles ? `${d.plan.miles}` : "lift"}
@@ -3766,9 +3775,13 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
                             </div>
                           )}
                           {!d.race && d.plan && <div className="dsub">{d.plan.kind === "rest" && !d.plan.lift ? "" : (d.plan.kind === "lift" ? d.plan.title : d.plan.title.replace(" run", "").replace("Race-pace", "RP"))}{d.plan.lift && d.plan.kind !== "lift" ? ` · ${d.plan.lift.replace("Lift — ", "").replace("Push — upper", "push")}` : ""}</div>}
+                          {!d.race && d.plan && guide && (() => {
+                            const pc = sessionPace(d.plan, guide, u);
+                            return pc ? <div className={`dpace${pc.source === "hal" ? "" : " guide"}`} title={`${pc.label}: ${pc.why}`}>{pc.short}</div> : null;
+                          })()}
                           {(d.ran || d.lifted) && (
                             <div className={`dmark ${hit == null ? "done" : hit >= 0.85 ? "done" : hit >= 0.5 ? "short" : "short"}`}>
-                              {d.ran ? `${d.ran}` : "lift"}{d.ran && d.lifted ? "+L" : ""}
+                              {d.ran ? `${d.ran}${d.pace ? ` · ${secsToClock(d.pace)}` : ""}` : "lift"}{d.ran && d.lifted ? "+L" : ""}
                             </div>
                           )}
                           {d.past && !d.ran && !d.lifted && d.plan && d.plan.kind !== "rest" && <div className="dmark missed">×</div>}
@@ -3791,13 +3804,51 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
             <span><i style={{ background: HEX.rest }} />actually ran</span>
             <span><i style={{ background: HEX.alert }} />🏁 race day</span>
             <span>+L means a lift that day as well · × a planned session with nothing logged · a dot marks a day you edited</span>
+            {guide && <span>pace per {u}: plain = Hal's rule · <i>~ italic</i> = a guide or my estimate, not his</span>}
           </div>
         </div>
       </div>
 
+      {guide && (
+        <div className="panel">
+          <h2>How pace is set <span className="hint">goal {race.goalTime} · race pace {clk(guide.race)}/{u}</span></h2>
+          <div className="body">
+            <table>
+              <thead><tr><th>Run</th><th className="num">Pace / {u}</th><th style={{ paddingLeft: 18 }}>Where it comes from</th></tr></thead>
+              <tbody>
+                {[
+                  ["Race day and \"pace\" runs", { lo: guide.race, hi: guide.race, source: "hal" }, "Hal: a \"pace\" day is run at goal race pace. Held even; no banking time early."],
+                  ["Long runs", guide.long, guide.higdon ? "Hal: \"anywhere from 30 to 90 or more seconds per mile slower than their marathon pace\", at a pace where you can converse. He would rather you ran long runs too slow than too fast." : "A guide; Hal's rule is written for the half and the marathon."],
+                  ["Optional 3/1 finish", guide.threeOne, "Hal: the last quarter of a long run at a \"somewhat faster pace–though still not race pace\". No more than once every three weekends."],
+                  ["Easy days", guide.easy, "Hal gives no number, on purpose: \"comfortable\", \"conversational\", and after a rest day it can be faster than race pace. This is only a typical range; let your breathing decide."],
+                  ["Tuesday intervals", guide.interval, `Not part of Hal's Intermediate 2 plan, which he says has no speedwork. About 5K to 10K effort, estimated from ${guide.quality.basis}.`],
+                ].map(([label, band, why]) => {
+                  const pc = sessionPace({ title: label.startsWith("Race") ? "pace" : label.startsWith("Long") ? "long" : label.startsWith("Tuesday") ? "intervals" : "easy", kind: "run" }, guide, u);
+                  const text = label.startsWith("Optional") ? `${clk5(band.lo)}–${clk5(band.hi)}` : pc?.text;
+                  return (
+                    <tr key={label}>
+                      <td style={{ whiteSpace: "nowrap" }}>{label}</td>
+                      <td className="num" style={{ whiteSpace: "nowrap", fontStyle: band.source === "hal" ? "normal" : "italic", color: band.source === "hal" ? "var(--ink)" : "var(--soft)" }}>
+                        {band.source === "hal" ? "" : "~"}{text}
+                      </td>
+                      <td style={{ color: "var(--soft)", fontSize: 12.5, paddingLeft: 18 }}>{why}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="note" style={{ marginTop: 10, color: "var(--faint)" }}>
+              Source: Hal Higdon's Intermediate 2 marathon programme and his notes on weekday pace. He prescribes two numbers: long runs and race-pace days.
+              Everything marked ~ is filled in so a plain "easy" has something to run to, and is not his. Figures use the true marathon distance of 26.2188 miles,
+              which is why a 3:30:00 goal is 8:01 a mile and not 8:00.
+            </p>
+          </div>
+        </div>
+      )}
+
       {pick && (
         <div className="panel">
-          <h2>{pick.dow} {fmtDayLabel(pick.date)}
+          <h2>{fmtDayLabel(pick.date)}
             <button className="del" onClick={() => { setPick(null); setEdit(null); }} style={{ fontSize: 13 }}>close</button>
           </h2>
           <div className="body">
@@ -3828,6 +3879,28 @@ function Calendar({ daily, settings, setSettings, planned, setPlanned }) {
                   )}
                 </div>
                 {pick.plan?.note && <p className="note" style={{ color: "var(--ink)" }}>{pick.plan.note}</p>}
+                {(() => {
+                  const pc = guide && pick.plan ? sessionPace(pick.plan, guide, u) : null;
+                  if (!pc) return null;
+                  const faster = pick.ran && pick.pace ? Math.round(Math.round(pc.lo / 5) * 5 - pick.pace) : null;   // seconds faster than the fast end of the band as shown
+                  return (
+                    <div style={{ margin: "8px 0", padding: "8px 10px", borderLeft: `3px solid ${pc.source === "hal" ? HEX.run : "var(--rule)"}` }}>
+                      <div><b style={{ fontSize: 15 }}>{pc.source === "hal" ? "" : "~"}{pc.text} / {u}</b> <span className="pill">{pc.label}</span></div>
+                      <p className="note" style={{ margin: "4px 0 0" }}>{pc.why}</p>
+                      {pc.type === "long" && pick.plan.miles >= 13 && !pick.past && (
+                        <p className="note" style={{ margin: "4px 0 0" }}>
+                          Optional 3/1: the last {Math.round(pick.plan.miles / 4)} {u} a touch faster, {clk5(guide.threeOne.lo)}–{clk5(guide.threeOne.hi)}, still slower than race pace.
+                        </p>
+                      )}
+                      {pick.ran && pick.pace && pc.type !== "quality" && (
+                        <p className="note" style={{ margin: "4px 0 0", color: faster > 15 && pc.type === "long" ? HEX.lift : "var(--soft)" }}>
+                          You ran {secsToClock(pick.pace)} / {u}.
+                          {pc.type === "long" && faster > 15 ? ` That is ${faster} s faster than Hal's band allows for a long run; he would rather you ran it too slow than too fast.` : ""}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div className="divline" />
                 <div className="grid4" style={{ gap: 12 }}>
                   <Stat v={pick.ran ? `${pick.ran} ${u}` : pick.lifted ? "lift" : pick.past ? "nothing" : "—"}

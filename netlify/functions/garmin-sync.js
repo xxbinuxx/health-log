@@ -12,7 +12,7 @@
 // ("rateLimited": true), not an error, so the caller can wait and resume.
 import { admin, json, userFromRequest } from "./lib/shared.js";
 import {
-  garminReady, getToken, pullKind, pullFitnessAge, planWindows, makeGate, ENDPOINTS, RateLimited,
+  garminReady, getToken, pullKind, pullFitnessAge, planWindows, makeGate, ENDPOINTS, RateLimited, describe,
   readSleep, readDaily, readSteps, readStress, readHrv, readBodyBattery, readWeight, readFitnessAge,
 } from "./lib/garmin.js";
 
@@ -104,7 +104,7 @@ export async function syncOne(db, userId, { days = 14, before = 0, dry = false, 
 
     const report = {};
     for (const k of kinds) report[k] = { rows: got[k].rows.length, status: got[k].statuses.join(","), error: got[k].error, fields: got[k].sampleKeys };
-    if (before === 0) report.fitnessAge = { rows: fitRes.row ? 1 : 0, status: String(fitRes.status ?? "") };
+    if (before === 0) report.fitnessAge = { rows: fitRes.row ? 1 : 0, status: String(fitRes.status ?? ""), fields: describe(fitRes.row) };
 
     const m = await loadMaps(db, userId);
     for (const k of kinds) ingest(m, k, got[k].rows);

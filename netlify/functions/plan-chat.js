@@ -4,7 +4,7 @@
 import { admin, json, userFromRequest } from "./lib/shared.js";
 import { chatJson, groqReady } from "./lib/groq.js";
 import { rollup, toDayKey, addDays, secsToClock, round, sum } from "../../scores.js";
-import { buildPlan, raceType } from "../../plan.js";
+import { buildPlan, raceType, paceGuide, describeGuide } from "../../plan.js";
 
 const KEYS = { doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions", days: "hl2:days", settings: "hl2:settings" };
 
@@ -40,7 +40,7 @@ Rules:
 - No long run more than 4 miles beyond the longest already planned or run before it.
 - A long run should not exceed about 60% of its week.
 - Return an empty operations list when they are only asking a question.
-- Quote the figures you are given. Never invent mileage or paces.
+- Quote the figures you are given. Never invent mileage or paces. If asked what pace to run something at, use the "paces" in the context and say whether it is Hal Higdon's rule or a guide: only long runs and "pace" days carry a number from him; easy days are "comfortable, conversational", and intervals are not part of his plan.
 - Say plainly when a request would be a bad idea, and offer the nearest sensible alternative as operations.`;
 
 export async function handler(event) {
@@ -58,7 +58,7 @@ export async function handler(event) {
     if (message.length > 4000) return json(400, { error: "That is too long even for a full schedule — split it across two messages." });
     const state = await load(db, user.id);
     const today = toDayKey(new Date());
-    const upcoming = (state.settings?.races || []).filter((x) => x.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+    const upcoming = (state.settings?.races || []).filter((x) => x.date >= today && x.status !== "watching").sort((a, b) => (a.date < b.date ? -1 : 1))[0];
     const r = upcoming || state.settings?.race;
     if (!r?.date || !r?.goalTime) return json(400, { error: "Add an upcoming race with a goal time first." });
 
@@ -74,7 +74,9 @@ export async function handler(event) {
     const ctx = {
       today,
       race: { name: r.name, distance: raceType(r.kind).name, date: r.date, goal: r.goalTime,
-        goal_pace: `${secsToClock(plan.paces.race)}/${plan.unit}` },
+        goal_pace: `${secsToClock(plan.paces.race * (plan.unit === "km" ? 1 / 1.609344 : 1))}/${plan.unit}` },
+      // Hal Higdon's pace rules, each labelled for whether it is his or a guide, so the chat quotes rather than invents
+      paces: describeGuide(paceGuide(goalSeconds, raceType(r.kind).miles, { races: state.settings?.races || [], todayKey: today }), plan.unit),
       taper_begins: plan.weeks[plan.taperStart]?.monday ?? null,
       form: { weekly_miles_recent: plan.form.recentWeekly, longest_90d: plan.form.longest, unit: plan.unit },
     };

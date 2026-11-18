@@ -835,15 +835,15 @@ function GarminPanel() {
         ms += w.ms || 0;
       } catch (e) { report[k] = { rows: 0, error: String(e.message || e) }; }
     }
-    // the last few nights in full: that is where the overnight resting heart rate is. A test looks at
-    // one night so the fields it sends can be inspected; a real sync takes three.
+    // the last few days of heart rate, for an overnight resting rate. A test looks at one day so the
+    // fields it sends can be inspected; a real sync takes three.
     await wait(1500);
     try {
-      const w = await call(`detail=sleep&days=${dry ? 1 : 3}${dry ? "&dry=1" : ""}`);
-      report.sleepDetail = w.rateLimited ? { rows: 0, error: "rate limited" }
-        : { rows: w.rows, status: w.status, ms: w.ms, error: w.error || null, fields: w.fields };
+      const w = await call(`detail=heartRate&days=${dry ? 1 : 3}${dry ? "&dry=1" : ""}`);
+      report.overnightHR = w.rateLimited ? { rows: 0, error: "rate limited" }
+        : { rows: w.rows, status: w.status, ms: w.ms, error: w.error || null, note: w.note, fields: w.fields };
       ms += w.ms || 0;
-    } catch (e) { report.sleepDetail = { rows: 0, error: String(e.message || e) }; }
+    } catch (e) { report.overnightHR = { rows: 0, error: String(e.message || e) }; }
     return { ...first, report, ms };
   };
 
@@ -975,7 +975,7 @@ function GarminPanel() {
                     <td>{k}</td>
                     <td className="num" style={{ color: v.rows ? HEX.run : HEX.alert }}>{v.rows}</td>
                     <td style={{ color: "var(--faint)", fontSize: 11.5, whiteSpace: "nowrap" }}>
-                      {v.error ? v.error : v.status || "ok"}{v.ms ? ` · ${(v.ms / 1000).toFixed(1)}s` : ""}
+                      {v.error ? v.error : v.status || "ok"}{v.ms ? ` · ${(v.ms / 1000).toFixed(1)}s` : ""}{v.note ? ` · ${v.note}` : ""}
                     </td>
                     <td style={{ color: "var(--faint)", fontSize: 11, maxWidth: 520, whiteSpace: "normal", wordBreak: "break-word" }}>{(v.fields || []).join("  ")}</td>
                   </tr>

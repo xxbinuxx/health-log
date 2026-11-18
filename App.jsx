@@ -850,6 +850,7 @@ function GarminPanel() {
       const d = await runAll(14, false);
       setMsg(d.rateLimited ? { ok: false, text: "Garmin is rate-limiting this key. Wait about 15 minutes before syncing again; asking sooner only extends the wait." } : { ok: true, data: d });
       await loadState();
+      window.dispatchEvent(new Event("hl-refresh"));         // show what was just saved, instead of waiting for the next refocus
     } catch (e) { setMsg({ ok: false, text: String(e.message || e) }); await loadState(); }
     finally { setBusy(""); }
   };
@@ -871,6 +872,7 @@ function GarminPanel() {
     } else if (r.status === "stopped") { persist({ ...saved, next: r.next, rows, strikes: saved.strikes || 0 }); setMsg({ ok: true, summary: `Paused at request ${r.next + 1} of ${saved.steps.length}.` }); }
     else { persist({ ...saved, next: r.next, rows, strikes: saved.strikes || 0 }); setMsg({ ok: false, text: `Stopped at request ${r.next + 1}: ${r.error}. Nothing was skipped; resume tries that one again.` }); }
     setLive(null); setBusy(""); await loadState();
+    window.dispatchEvent(new Event("hl-refresh"));
   };
 
   const start = async () => {
@@ -972,7 +974,7 @@ function GarminPanel() {
               </tbody>
             </table>
             <p className="note" style={{ marginTop: 8, color: "var(--faint)" }}>
-              {msg.dry ? "This was a test: nothing was saved. Press Sync last 14 days to save." : "Saved."}{" "}
+              {msg.dry ? "This was a test: nothing was saved. Press Sync last 14 days to save." : "Saved, and the Log and Wellness tabs have been refreshed."}{" "}
               Took {Math.round((msg.data.ms || 0) / 100) / 10}s{msg.data.partial ? " — Garmin was slow on some of it" : ""}.
               If a row shows 0 rows, send me its name and the fields beside it and the mapping is a one-line fix.
             </p>
@@ -4764,8 +4766,9 @@ export default function HealthLog({ email, onSignOut }) {
     };
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
+    window.addEventListener("hl-refresh", refresh);          // sent by the Garmin panel the moment a sync finishes
     const t = setInterval(refresh, 5 * 60 * 1000);
-    return () => { document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); clearInterval(t); };
+    return () => { document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("hl-refresh", refresh); clearInterval(t); };
   }, [loaded]);
   useEffect(() => { save(KEYS.settings, settings); }, [settings, save]);
 

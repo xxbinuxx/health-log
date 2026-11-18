@@ -13,7 +13,7 @@
 import { admin, json, userFromRequest } from "./lib/shared.js";
 import {
   garminReady, getToken, pullKind, pullFitnessAge, pullDay, planWindows, makeGate, ENDPOINTS, DETAIL, RateLimited, describe,
-  readSleepDetail, readSleep, readDaily, readSteps, readStress, readHrv, readBodyBattery, readWeight, readFitnessAge,
+  readHeartRate, readSleep, readDaily, readSteps, readStress, readHrv, readBodyBattery, readWeight, readFitnessAge,
 } from "./lib/garmin.js";
 
 const SLEEP = "hl2:sleep", WELL = "hl2:wellness", DAYS = "hl2:days", STATE = "hl2:garminState";
@@ -60,7 +60,8 @@ function ingest(m, kind, rows) {
     if (kind === "sleeps") {
       const x = readSleep(r); if (!x.date) continue;
       m.touchS(x.date, { score: x.score, asleepMin: x.asleepMin, restingHr: x.restingHr, bedtime: x.bedtime });
-      m.touchW(x.date, { deepMin: x.deepMin, remMin: x.remMin, awakeMin: x.awakeMin, spo2: x.spo2, respiration: x.respiration });
+      m.touchW(x.date, { deepMin: x.deepMin, remMin: x.remMin, awakeMin: x.awakeMin, spo2: x.spo2, respiration: x.respiration,
+        sleepStartMs: x.startMs, sleepEndMs: x.endMs });
     } else if (kind === "dailies") {
       const x = readDaily(r); if (!x.date) continue;
       m.touchW(x.date, { steps: x.steps, stressAvg: x.stressAvg, stressMax: x.stressMax, intensityMin: x.intensityMin,
@@ -78,12 +79,14 @@ function ingest(m, kind, rows) {
       m.touchS(x.date, { bodyBattery: x.bodyBatteryWake });
       m.touchW(x.date, { bodyBatteryHigh: x.bodyBatteryHigh, bodyBatteryLow: x.bodyBatteryLow });
     } else if (kind === "weight") { const x = readWeight(r); if (x.date && x.weightKg != null) m.touchW(x.date, { weightKg: x.weightKg }); }
-    else if (kind === "sleepDetail") {
-      // the figure on Garmin's own sleep screen. It replaces the all-day one the daily summary
-      // supplied, and the daily summary never writes over it afterwards (see "dailies" above)
-      const x = readSleepDetail(r); if (!x.date) continue;
-      m.touchS(x.date, { restingHr: x.restingHr });
-      m.touchW(x.date, { spo2: x.spo2 });
+    else if (kind === "heartRate") {
+      // an overnight resting rate. It replaces the all-day one the daily summary supplied, and the
+      // daily summary never writes over it afterwards (see "dailies" above). The sleep window,
+      // saved when the night was pulled, says which stretch of the day to look at.
+      const date = r.__date; if (!date) continue;
+      const w = m.wellBy.get(date);
+      const x = readHeartRate(r, { start: w?.sleepStartMs, end: w?.sleepEndMs });
+      m.touchS(date, { restingHr: x.restingHr });
     }
   }
 }
@@ -129,8 +132,8 @@ export async function syncOne(db, userId, { days = 14, before = 0, dry = false, 
   } finally { clearTimeout(timer); }
 }
 
-/* The last few nights in full, one request each. Kept apart from the range pulls because there is
-   one request per night, so it is only ever asked about the most recent few. */
+/* The last few days of heart rate, one request each. Kept apart from the range pulls because it is
+   one request per day, so it is only ever asked about the most recent few. */
 export async function syncDetail(db, userId, { days = 3, dry = false, gapMs = 600, deadlineMs = 7000 } = {}) {
   const t0 = Date.now();
   const ctrl = new AbortController();
@@ -139,21 +142,26 @@ export async function syncDetail(db, userId, { days = 3, dry = false, gapMs = 60
     const token = await getToken(ctrl.signal);
     const gate = makeGate(gapMs);
     const dates = Array.from({ length: Math.max(1, Math.min(7, days)) }, (_, i) => iso(Date.now() - i * 864e5));
-    const got = await Promise.all(dates.map((d) => pullDay(token, "sleepDetail", d, ctrl.signal, gate)));
+    const got = await Promise.all(dates.map((d) => pullDay(token, "heartRate", d, ctrl.signal, gate)));
     const rateLimited = got.some((g) => g.rateLimited);
     const rows = got.map((g) => g.row).filter(Boolean);
-    const found = rows.map(readSleepDetail).filter((x) => x.restingHr != null).length;
-    if (!dry && rows.length) {
-      const m = await loadMaps(db, userId);
-      ingest(m, "sleepDetail", rows);
-      await saveMaps(db, userId, m);
-    }
+
+    const m = await loadMaps(db, userId);
+    const reads = rows.map((r) => { const w = m.wellBy.get(r.__date); return readHeartRate(r, { start: w?.sleepStartMs, end: w?.sleepEndMs }); });
+    const found = reads.filter((x) => x.restingHr != null);
+    if (!dry && rows.length) { ingest(m, "heartRate", rows); await saveMaps(db, userId, m); }
+
+    const tally = {};
+    for (const x of found) tally[x.source] = (tally[x.source] || 0) + 1;
     const sample = got.find((g) => g.fields?.length);
     const firstError = got.find((g) => g.error)?.error || null;
-    return { kind: "sleepDetail", nights: dates.length, rows: found, status: [...new Set(got.map((g) => g.status))].join(","), ms: Date.now() - t0, dry,
-      fields: sample?.fields || [], error: found ? null : firstError, ...(rateLimited ? rateLimitedAnswer() : {}) };
+    return { kind: "heartRate", nights: dates.length, rows: found.length, ms: Date.now() - t0, dry,
+      status: [...new Set(got.map((g) => g.status))].join(","),
+      note: found.length ? Object.entries(tally).map(([k, v]) => `${v} ${k}`).join(", ")
+        : rows.length ? `${rows.length} day${rows.length === 1 ? "" : "s"} returned, but no resting figure and too few samples to work one out` : null,
+      fields: sample?.fields || [], error: found.length || rows.length ? null : firstError, ...(rateLimited ? rateLimitedAnswer() : {}) };
   } catch (e) {
-    if (e instanceof RateLimited) return rateLimitedAnswer({ kind: "sleepDetail", rows: 0 });
+    if (e instanceof RateLimited) return rateLimitedAnswer({ kind: "heartRate", rows: 0 });
     throw e;
   } finally { clearTimeout(timer); }
 }
@@ -201,7 +209,7 @@ export async function handler(event) {
 
     if (!garminReady()) return json(503, { error: "Garmin is not connected: add GARMIN_PERSONAL_API_KEY in Netlify, then deploy." });
 
-    if (q.detail === "sleep") {
+    if (q.detail === "heartRate") {
       return json(200, await syncDetail(db, user.id, { days: Number(q.days) || 3, dry: q.dry === "1" }));
     }
 

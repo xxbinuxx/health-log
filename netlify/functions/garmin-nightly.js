@@ -14,7 +14,7 @@
 // reads the New York clock itself and decides whether to act. Most invocations stop at once.
 import { admin, env } from "./lib/shared.js";
 import { garminReady } from "./lib/garmin.js";
-import { syncOne, getKey, setKey } from "./garmin-sync.js";
+import { syncOne, syncDetail, getKey, setKey } from "./garmin-sync.js";
 
 const SLEEP = "hl2:sleep", STATE = "hl2:garminState";
 const COOLDOWN_MIN = 90;        // after a 429: Garmin does not say how long, so be generous
@@ -60,7 +60,11 @@ export async function runNightly(db, { now = new Date() } = {}) {
         out.push({ user: u.email, rateLimited: true });
         continue;
       }
-      out.push({ user: u.email, ran: d.why, ms: r.ms, rows: Object.values(r.report).reduce((a, v) => a + (v.rows || 0), 0), partial: r.partial });
+      // then the last few nights in full, which is where the overnight resting heart rate lives
+      let detail = null;
+      try { detail = await syncDetail(db, u.id, { days: 3, gapMs: 1800, deadlineMs: 20000 }); }
+      catch (e) { console.error("garmin-nightly: sleep detail failed —", e?.message || e); }
+      out.push({ user: u.email, ran: d.why, ms: r.ms, rows: Object.values(r.report).reduce((a, v) => a + (v.rows || 0), 0), partial: r.partial, overnightRhr: detail?.rows ?? null });
     } catch (e) {
       console.error("garmin-nightly:", u.email, e?.message || e);
       out.push({ user: u.email, error: String(e.message || e) });

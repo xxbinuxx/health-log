@@ -65,7 +65,11 @@ function ingest(m, kind, rows) {
       const x = readDaily(r); if (!x.date) continue;
       m.touchW(x.date, { steps: x.steps, stressAvg: x.stressAvg, stressMax: x.stressMax, intensityMin: x.intensityMin,
         floors: x.floors, calories: x.calories, bodyBatteryHigh: x.bodyBatteryHigh, bodyBatteryLow: x.bodyBatteryLow });
-      m.touchS(x.date, { restingHr: x.restingHr, bodyBattery: x.bodyBatteryWake });
+      // the sleep record's resting HR is the one your imported history uses, so the all-day figure
+      // from here only fills the gap when the sleep data did not supply one; otherwise the trend
+      // would change definition depending on which request happened to arrive last
+      const haveSleepRhr = m.sleepBy.get(x.date)?.restingHr != null;
+      m.touchS(x.date, { ...(haveSleepRhr ? {} : { restingHr: x.restingHr }), bodyBattery: x.bodyBatteryWake });
     } else if (kind === "steps") { const x = readSteps(r); if (x.date) m.touchW(x.date, { steps: x.steps }); }
     else if (kind === "stress") { const x = readStress(r); if (x.date) m.touchW(x.date, { stressAvg: x.stressAvg, stressMax: x.stressMax }); }
     else if (kind === "hrv") { const x = readHrv(r); if (x.date && x.hrv != null) m.touchW(x.date, { hrv: x.hrv, hrvStatus: x.hrvStatus }); }
@@ -81,7 +85,7 @@ const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
 const rateLimitedAnswer = (extra = {}) => ({ rateLimited: true, retryAfter: null, ...extra });
 
 /* A short sync of recent days. Requests start 500 ms apart rather than all at once. */
-export async function syncOne(db, userId, { days = 14, before = 0, dry = false, gapMs = 500, deadlineMs = 7000 } = {}) {
+export async function syncOne(db, userId, { days = 14, before = 0, dry = false, gapMs = 500, deadlineMs = 7000, skip = [] } = {}) {
   const t0 = Date.now();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), deadlineMs);
@@ -89,20 +93,21 @@ export async function syncOne(db, userId, { days = 14, before = 0, dry = false, 
     const token = await getToken(ctrl.signal);
     const to = iso(Date.now() - before * 864e5), from = iso(Date.now() - (before + days - 1) * 864e5);
     const gate = makeGate(gapMs);
+    const kinds = ALL_KINDS.filter((k) => !skip.includes(k));      // the browser asks for slow ones separately
 
     const [fitRes, ...results] = await Promise.all([
       before === 0 ? pullFitnessAge(token, to, ctrl.signal, gate) : Promise.resolve({ row: null, status: null }),
-      ...ALL_KINDS.map((k) => pullKind(token, k, from, to, ctrl.signal, gate).then((r) => [k, r])),
+      ...kinds.map((k) => pullKind(token, k, from, to, ctrl.signal, gate).then((r) => [k, r])),
     ]);
     const got = Object.fromEntries(results);
     const rateLimited = results.some(([, r]) => r.rateLimited) || fitRes.status === 429;
 
     const report = {};
-    for (const k of ALL_KINDS) report[k] = { rows: got[k].rows.length, status: got[k].statuses.join(","), error: got[k].error, fields: got[k].sampleKeys };
+    for (const k of kinds) report[k] = { rows: got[k].rows.length, status: got[k].statuses.join(","), error: got[k].error, fields: got[k].sampleKeys };
     if (before === 0) report.fitnessAge = { rows: fitRes.row ? 1 : 0, status: String(fitRes.status ?? "") };
 
     const m = await loadMaps(db, userId);
-    for (const k of ALL_KINDS) ingest(m, k, got[k].rows);
+    for (const k of kinds) ingest(m, k, got[k].rows);
     if (fitRes.row) { const x = readFitnessAge(fitRes.row); m.touchS(to, { fitnessAge: x.fitnessAge, vo2: x.vo2 }); }
 
     if (!dry) {
@@ -117,21 +122,27 @@ export async function syncOne(db, userId, { days = 14, before = 0, dry = false, 
   } finally { clearTimeout(timer); }
 }
 
-/* Exactly one request, for a backfill the browser paces itself. */
-export async function syncWindow(db, userId, { kind, from, to }) {
+/* Exactly one request: for a backfill the browser paces itself, and for the slow endpoints,
+   which then get the whole time budget to themselves. With dry set it reads and reports but
+   saves nothing, which is what a connection test needs. */
+export async function syncWindow(db, userId, { kind, from, to, dry = false }) {
   if (!ENDPOINTS[kind]) throw new Error(`unknown kind "${kind}"`);
+  const t0 = Date.now();
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8000);
+  const timer = setTimeout(() => ctrl.abort(), 7500);
   try {
     const token = await getToken(ctrl.signal);
     const r = await pullKind(token, kind, from, to, ctrl.signal);
-    if (r.rateLimited) return rateLimitedAnswer({ kind, from, to, rows: 0 });
+    const base = { kind, from, to, ms: Date.now() - t0, status: r.statuses.join(","), fields: r.sampleKeys, dry };
+    if (r.rateLimited) return rateLimitedAnswer({ ...base, rows: 0 });
     // a window that failed for any other reason must not look like "no data"
-    if (!r.rows.length && r.error && !/^(200|204)$/.test(r.statuses.join(","))) return { kind, from, to, rows: 0, failed: true, error: r.error, status: r.statuses.join(",") };
-    const m = await loadMaps(db, userId);
-    ingest(m, kind, r.rows);
-    await saveMaps(db, userId, m);
-    return { kind, from, to, rows: r.rows.length, status: r.statuses.join(",") };
+    if (!r.rows.length && r.error && !/^(200|204)$/.test(r.statuses.join(","))) return { ...base, rows: 0, failed: true, error: r.error };
+    if (!dry) {
+      const m = await loadMaps(db, userId);
+      ingest(m, kind, r.rows);
+      await saveMaps(db, userId, m);
+    }
+    return { ...base, rows: r.rows.length };
   } catch (e) {
     if (e instanceof RateLimited) return rateLimitedAnswer({ kind, from, to, rows: 0 });
     throw e;
@@ -156,12 +167,13 @@ export async function handler(event) {
 
     if (q.kind) {
       if (!/^\d{4}-\d\d-\d\d$/.test(q.from || "") || !/^\d{4}-\d\d-\d\d$/.test(q.to || "")) return json(400, { error: "from and to must be YYYY-MM-DD." });
-      return json(200, await syncWindow(db, user.id, { kind: q.kind, from: q.from, to: q.to }));
+      return json(200, await syncWindow(db, user.id, { kind: q.kind, from: q.from, to: q.to, dry: q.dry === "1" }));
     }
     return json(200, await syncOne(db, user.id, {
       days: Math.min(60, Math.max(1, Number(q.days) || 14)),
       before: Math.max(0, Number(q.before) || 0),
       dry: q.dry === "1",
+      skip: String(q.skip || "").split(",").filter((k) => ENDPOINTS[k]),
     }));
   } catch (e) {
     console.error("garmin-sync:", e?.message || e);

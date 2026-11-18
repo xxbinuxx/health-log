@@ -835,6 +835,15 @@ function GarminPanel() {
         ms += w.ms || 0;
       } catch (e) { report[k] = { rows: 0, error: String(e.message || e) }; }
     }
+    // the last few nights in full: that is where the overnight resting heart rate is. A test looks at
+    // one night so the fields it sends can be inspected; a real sync takes three.
+    await wait(1500);
+    try {
+      const w = await call(`detail=sleep&days=${dry ? 1 : 3}${dry ? "&dry=1" : ""}`);
+      report.sleepDetail = w.rateLimited ? { rows: 0, error: "rate limited" }
+        : { rows: w.rows, status: w.status, ms: w.ms, error: w.error || null, fields: w.fields };
+      ms += w.ms || 0;
+    } catch (e) { report.sleepDetail = { rows: 0, error: String(e.message || e) }; }
     return { ...first, report, ms };
   };
 

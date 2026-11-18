@@ -286,27 +286,31 @@ export function readSleep(raw) {
   };
 }
 
+/* The daily summary nests everything: heartRate, stress, bodyBattery, movement, calories and
+   intensityMinutes are objects, and several of them have a field called maxValue or minValue.
+   Flattening them into one row would let the first one win, so the nested objects are read
+   by path, with the old flat names kept as a fallback. Names are Garmin's own, taken from a
+   real response. */
 export function readDaily(raw) {
   const r = flat(raw);
-  // seconds or minutes depending on the name Garmin used; report minutes either way
-  const dur = (names) => {
-    for (const n of names) { const v = num(r[n]); if (v != null) return /Minutes$|^moderate$|^vigorous$/.test(n) ? v : v / 60; }
-    return null;
-  };
-  const mod = dur(["moderateIntensityDurationInSeconds", "moderateIntensityMinutes", "moderate"]);
-  const vig = dur(["vigorousIntensityDurationInSeconds", "vigorousIntensityMinutes", "vigorous"]);
+  const o = (k) => (isObj(raw?.[k]) ? raw[k] : {});
+  const hr = o("heartRate"), st = o("stress"), bb = o("bodyBattery"), mv = o("movement"), cal = o("calories"), im = o("intensityMinutes");
+  const first = (obj, names) => { for (const n of names) { const v = num(obj[n]); if (v != null) return v; } return null; };
+  const mod = first(im, ["moderate", "moderateIntensityMinutes"]) ?? (num(r.moderateIntensityDurationInSeconds) != null ? num(r.moderateIntensityDurationInSeconds) / 60 : null);
+  const vig = first(im, ["vigorous", "vigorousIntensityMinutes"]) ?? (num(r.vigorousIntensityDurationInSeconds) != null ? num(r.vigorousIntensityDurationInSeconds) / 60 : null);
   return {
     date: dateOf(r),
-    steps: num(pick(r, ["totalSteps", "steps"])),
-    restingHr: num(pick(r, ["restingHeartRate", "restingHeartRateInBeatsPerMinute", "restingHR"])),
-    stressAvg: num(pick(r, ["averageStressLevel", "avgStressLevel", "overallStressLevel"])),
-    stressMax: num(pick(r, ["maxStressLevel", "stressMax"])),
-    bodyBatteryHigh: num(pick(r, ["bodyBatteryHighestValue", "bodyBatteryChargedValue", "highestBodyBattery"])),
-    bodyBatteryLow: num(pick(r, ["bodyBatteryLowestValue", "lowestBodyBattery"])),
-    bodyBatteryWake: num(pick(r, ["bodyBatteryAtWakeTime", "bodyBatteryMostRecentValue"])),
+    steps: first(mv, ["steps", "totalSteps"]) ?? num(pick(r, ["totalSteps", "steps"])),
+    restingHr: first(hr, ["restingValue", "restingHeartRate"]) ?? num(pick(r, ["restingHeartRate", "restingHeartRateInBeatsPerMinute", "restingHR"])),
+    stressAvg: first(st, ["avgLevel", "averageStressLevel"]) ?? num(pick(r, ["averageStressLevel", "avgStressLevel", "overallStressLevel"])),
+    stressMax: first(st, ["maxLevel", "maxStressLevel"]) ?? num(pick(r, ["maxStressLevel", "stressMax"])),
+    // the day's highest and lowest body battery LEVEL. chargedValue is how much it charged, which is a different thing
+    bodyBatteryHigh: first(bb, ["maxValue", "highestValue"]) ?? num(pick(r, ["bodyBatteryHighestValue", "highestBodyBattery"])),
+    bodyBatteryLow: first(bb, ["minValue", "lowestValue"]) ?? num(pick(r, ["bodyBatteryLowestValue", "lowestBodyBattery"])),
+    bodyBatteryWake: num(pick(r, ["bodyBatteryAtWakeTime"])),
     intensityMin: mod == null && vig == null ? null : Math.round((mod || 0) + 2 * (vig || 0)),
-    floors: num(pick(r, ["floorsAscended", "floorsClimbed", "floors"])),
-    calories: num(pick(r, ["activeKilocalories", "activeCalories", "caloriesBurned"])),
+    floors: first(mv, ["floorsAscended", "floorsClimbed"]) ?? num(pick(r, ["floorsAscended", "floorsClimbed", "floors"])),
+    calories: first(cal, ["burnedActive", "activeKilocalories"]) ?? num(pick(r, ["activeKilocalories", "activeCalories"])),
   };
 }
 
@@ -318,23 +322,36 @@ export function readHrv(raw) {
   return { date: dateOf(r), hrv: num(pick(r, ["lastNightAvg", "avgOvernightHrv", "hrvValue", "weeklyAvg"])), hrvStatus: pick(r, ["status", "hrvStatus"]) };
 }
 
-/* Body Battery arrives as a day of [timestamp, value] samples. The level on waking is the
-   peak in the first hours of the day — it charges through the night and starts falling
-   once you are up — so that is what "wake" means here. */
+/* Body Battery arrives as a day of samples shaped [timestamp, status, level, version], with a
+   descriptor list saying which column is which. Reading "the second column" gets the text
+   "MEASURED"; the level is found through the descriptors instead, falling back to the third
+   column for a four-column row and the second for a two-column one. The level on waking is the
+   peak in the first part of the day: it charges through the night and starts falling once you
+   are up. Fifteen hours covers a late riser. */
 export function readBodyBattery(raw) {
   const r = flat(raw);
-  const arr = Array.isArray(raw?.bodyBatteryValuesArray) ? raw.bodyBatteryValuesArray : [];
-  const pts = arr.map((p) => (Array.isArray(p) ? [num(p[0]), num(p[1])] : null)).filter((p) => p && p[0] != null && p[1] != null);
+  const rowsIn = Array.isArray(raw?.bodyBatteryValuesArray) ? raw.bodyBatteryValuesArray : [];
+  let tsIdx = 0, levelIdx = null;
+  for (const d of Array.isArray(raw?.bodyBatteryValueDescriptorDTOList) ? raw.bodyBatteryValueDescriptorDTOList : []) {
+    const key = String(d?.bodyBatteryValueDescriptorKey || "").toLowerCase(), idx = num(d?.bodyBatteryValueDescriptorIndex);
+    if (idx == null) continue;
+    if (key === "timestamp") tsIdx = idx;
+    else if (key.includes("level")) levelIdx = idx;
+  }
+  if (levelIdx == null) levelIdx = Array.isArray(rowsIn[0]) && rowsIn[0].length >= 3 ? 2 : 1;
+  const pts = rowsIn.map((p) => (Array.isArray(p) ? [num(p[tsIdx]), num(p[levelIdx])] : null))
+    .filter((p) => p && p[0] != null && p[1] != null);
   let wake = null, hi = null, lo = null;
   if (pts.length) {
     const t0 = pts[0][0];
-    wake = Math.max(...pts.filter((p) => p[0] - t0 <= 10 * 36e5).map((p) => p[1]));
+    wake = Math.max(...pts.filter((p) => p[0] - t0 <= 15 * 36e5).map((p) => p[1]));
     hi = Math.max(...pts.map((p) => p[1])); lo = Math.min(...pts.map((p) => p[1]));
   }
   return {
     date: dateOf(r),
-    bodyBatteryWake: wake ?? num(pick(r, ["wakeValue", "bodyBatteryAtWake", "endLevel"])),
-    bodyBatteryHigh: hi ?? num(pick(r, ["highest", "maxLevel", "charged"])),
+    bodyBatteryWake: wake ?? num(pick(r, ["wakeValue", "bodyBatteryAtWake"])),
+    // no fallback to `charged`: that is how much it charged, and saving it as a level would be wrong, not just missing
+    bodyBatteryHigh: hi ?? num(pick(r, ["highest", "maxLevel"])),
     bodyBatteryLow: lo ?? num(pick(r, ["lowest", "minLevel"])),
   };
 }

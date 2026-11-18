@@ -160,6 +160,16 @@ export function flat(r) {
   return out;
 }
 
+/* What a row looks like, including the contents of nested objects. The daily summaries
+   arrive as {movement:{...}, heartRate:{...}, stress:{...}} and the names INSIDE are what
+   matter, so list them rather than only the outer keys. */
+export function describe(row) {
+  if (!isObj(row)) return [];
+  const some = (o, n) => Object.keys(o).slice(0, n).join(",") + (Object.keys(o).length > n ? ",…" : "");
+  return Object.entries(row).slice(0, 60).map(([k, v]) =>
+    isObj(v) ? `${k}{${some(v, 10)}}` : Array.isArray(v) ? `${k}[${isObj(v[0]) ? `{${some(v[0], 6)}}` : typeof v[0]}]` : k);
+}
+
 /* One kind of data over a date range, in parallel windows, under a shared abort signal. */
 export async function pullKind(token, kind, from, to, signal, gate) {
   const ep = ENDPOINTS[kind];
@@ -195,7 +205,7 @@ export async function pullKind(token, kind, from, to, signal, gate) {
   const chunks = await Promise.all(windows.map(([a, b]) => call(a, b)));
   const rows = chunks.flat();
   return { rows, statuses: [...statuses], error: rows.length ? null : firstError, rateLimited, retryAfter,
-    sampleKeys: rows[0] ? Object.keys(flat(rows[0])).slice(0, 40) : [] };
+    sampleKeys: rows[0] ? describe(rows[0]) : [] };
 }
 
 export async function pullFitnessAge(token, date, signal, gate) {
@@ -232,6 +242,24 @@ const dateOf = (r) => {
   return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : null;
 };
 
+/* A wall-clock "HH:MM" from whatever Garmin sent. Its *Local timestamps are epoch
+   milliseconds ALREADY shifted into local time, so reading them as plain UTC gives the
+   local clock. (Reading them with the machine's own zone would shift them twice.) A
+   plain GMT timestamp can only be used when the offset is known; otherwise it is left
+   empty rather than guessed. */
+const clockOf = (v, offsetSec = 0) => {
+  if (v == null || v === "") return null;
+  let ms = null;
+  if (typeof v === "number" || /^\d{9,}$/.test(String(v))) { ms = Number(v); if (ms < 1e11) ms *= 1000; }
+  else {
+    const m = String(v).match(/[T ](\d{2}):(\d{2})/);
+    return m ? `${m[1]}:${m[2]}` : null;
+  }
+  const d = new Date(ms + (offsetSec || 0) * 1000);
+  if (!Number.isFinite(d.getTime())) return null;
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+};
+
 export function readSleep(raw) {
   const r = flat(raw);
   const direct = num(pick(r, ["sleepTimeSeconds", "durationInSeconds", "totalSleepSeconds", "sleepDurationInSeconds"]));
@@ -241,18 +269,11 @@ export function readSleep(raw) {
   const sc = r.sleepScores || {};
   const score = num(pick(r, ["overallSleepScore", "sleepScore", "overallScore"])) ?? num(sc.overall) ?? num(sc.overallScore) ?? num(r.overall);
 
-  let bedtime = null;
-  const startRaw = pick(r, ["sleepStartTimestampLocal", "startTimeLocal", "sleepStartLocal"]);
-  if (startRaw) { const m = String(startRaw).match(/[T ](\d{2}):(\d{2})/); if (m) bedtime = `${m[1]}:${m[2]}`; }
-  else if (num(r.startTimeInSeconds) != null) {
-    const dt = new Date((num(r.startTimeInSeconds) + (num(r.startTimeOffsetInSeconds) ?? 0)) * 1000);
-    bedtime = `${String(dt.getUTCHours()).padStart(2, "0")}:${String(dt.getUTCMinutes()).padStart(2, "0")}`;
-  } else if (num(r.sleepStartTimestampGMT) != null) {
-    // epoch milliseconds, GMT, with the local offset alongside
-    const off = num(r.sleepStartTimestampLocal) != null ? num(r.sleepStartTimestampLocal) - num(r.sleepStartTimestampGMT) : 0;
-    const dt = new Date(num(r.sleepStartTimestampGMT) + off);
-    bedtime = `${String(dt.getUTCHours()).padStart(2, "0")}:${String(dt.getUTCMinutes()).padStart(2, "0")}`;
-  }
+  // a GMT timestamp says nothing about the local clock unless the offset is known, so without
+  // one the field is left empty; showing the UTC hour as a bedtime would be wrong, not just missing
+  const off = num(r.startTimeOffsetInSeconds);
+  const bedtime = clockOf(r.sleepStartTimestampLocal ?? r.startTimeLocal ?? r.sleepStartLocal)
+    ?? (off == null ? null : clockOf(r.sleepStartTimestampGMT, off));
   return {
     date: dateOf(r), score, asleepMin: secs ? Math.round(secs / 60) : null,
     restingHr: num(pick(r, ["restingHeartRate", "restingHeartRateInBeatsPerMinute", "restingHR"])),
@@ -267,21 +288,25 @@ export function readSleep(raw) {
 
 export function readDaily(raw) {
   const r = flat(raw);
-  const mod = num(pick(r, ["moderateIntensityDurationInSeconds", "moderateIntensityMinutes"]));
-  const vig = num(pick(r, ["vigorousIntensityDurationInSeconds", "vigorousIntensityMinutes"]));
-  const asMin = (v, k) => (v == null ? null : r[k] != null && /Minutes/.test(k) ? v : v / 60);
+  // seconds or minutes depending on the name Garmin used; report minutes either way
+  const dur = (names) => {
+    for (const n of names) { const v = num(r[n]); if (v != null) return /Minutes$|^moderate$|^vigorous$/.test(n) ? v : v / 60; }
+    return null;
+  };
+  const mod = dur(["moderateIntensityDurationInSeconds", "moderateIntensityMinutes", "moderate"]);
+  const vig = dur(["vigorousIntensityDurationInSeconds", "vigorousIntensityMinutes", "vigorous"]);
   return {
     date: dateOf(r),
     steps: num(pick(r, ["totalSteps", "steps"])),
     restingHr: num(pick(r, ["restingHeartRate", "restingHeartRateInBeatsPerMinute", "restingHR"])),
     stressAvg: num(pick(r, ["averageStressLevel", "avgStressLevel", "overallStressLevel"])),
     stressMax: num(pick(r, ["maxStressLevel", "stressMax"])),
-    bodyBatteryHigh: num(pick(r, ["bodyBatteryHighestValue", "bodyBatteryChargedValue"])),
-    bodyBatteryLow: num(pick(r, ["bodyBatteryLowestValue"])),
+    bodyBatteryHigh: num(pick(r, ["bodyBatteryHighestValue", "bodyBatteryChargedValue", "highestBodyBattery"])),
+    bodyBatteryLow: num(pick(r, ["bodyBatteryLowestValue", "lowestBodyBattery"])),
     bodyBatteryWake: num(pick(r, ["bodyBatteryAtWakeTime", "bodyBatteryMostRecentValue"])),
-    intensityMin: mod == null && vig == null ? null : Math.round((asMin(mod, "moderateIntensityDurationInSeconds") || 0) + 2 * (asMin(vig, "vigorousIntensityDurationInSeconds") || 0)),
+    intensityMin: mod == null && vig == null ? null : Math.round((mod || 0) + 2 * (vig || 0)),
     floors: num(pick(r, ["floorsAscended", "floorsClimbed", "floors"])),
-    calories: num(pick(r, ["activeKilocalories", "caloriesBurned"])),
+    calories: num(pick(r, ["activeKilocalories", "activeCalories", "caloriesBurned"])),
   };
 }
 

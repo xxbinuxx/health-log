@@ -165,9 +165,12 @@ export function flat(r) {
    matter, so list them rather than only the outer keys. */
 export function describe(row) {
   if (!isObj(row)) return [];
-  const some = (o, n) => Object.keys(o).slice(0, n).join(",") + (Object.keys(o).length > n ? ",…" : "");
+  // "=null" marks a key that is present but EMPTY. Without it a field that exists and a field that
+  // actually holds a value look identical, which hid the missing resting heart rate.
+  const name = (k, v) => (v == null ? `${k}=null` : k);
+  const some = (o, n) => Object.entries(o).slice(0, n).map(([k, v]) => name(k, v)).join(",") + (Object.keys(o).length > n ? ",…" : "");
   return Object.entries(row).slice(0, 60).map(([k, v]) =>
-    isObj(v) ? `${k}{${some(v, 10)}}` : Array.isArray(v) ? `${k}[${isObj(v[0]) ? `{${some(v[0], 6)}}` : typeof v[0]}]` : k);
+    isObj(v) ? `${k}{${some(v, 10)}}` : Array.isArray(v) ? `${k}[${isObj(v[0]) ? `{${some(v[0], 6)}}` : typeof v[0]}]` : name(k, v));
 }
 
 /* One kind of data over a date range, in parallel windows, under a shared abort signal. */
@@ -212,9 +215,10 @@ export async function pullKind(token, kind, from, to, signal, gate) {
    would be 365 requests), so they are kept out of ENDPOINTS and the backfill plan, and only
    ever asked about the last few nights. */
 export const DETAIL = {
-  // the full record of one night. The range summary used for history carries no resting heart
-  // rate; this one is where Garmin Connect's own sleep screen gets its figure
-  sleepDetail: { url: (date) => `/sleep-service/sleep/dailySleep?date=${date}` },
+  // The whole day's heart-rate samples, and Garmin's own resting figure if it supplies one. (The
+  // single-night sleep endpoint was tried first and returns the same fields as the sleep summary,
+  // with an average heart rate but no resting one, so it is not used.)
+  heartRate: { url: (date) => `/wellness-service/wellness/dailyHeartRate?date=${date}` },
 };
 
 export async function pullDay(token, kind, date, signal, gate) {
@@ -287,6 +291,8 @@ const clockOf = (v, offsetSec = 0) => {
   return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
 };
 
+const epochMs = (v) => { const n = num(v); return n == null ? null : n < 1e11 ? n * 1000 : n; };
+
 export function readSleep(raw) {
   const r = flat(raw);
   const direct = num(pick(r, ["sleepTimeSeconds", "durationInSeconds", "totalSleepSeconds", "sleepDurationInSeconds"]));
@@ -309,6 +315,8 @@ export function readSleep(raw) {
     remMin: mins(pick(r, ["remSleepInSeconds", "remSleepSeconds"])),
     awakeMin: mins(pick(r, ["awakeDurationInSeconds", "awakeSleepSeconds"])),
     spo2: num(pick(r, ["averageSpO2Value", "avgSpo2", "averageSpO2", "averageSpO2HRSleep"])),
+    // when the night began and ended, in epoch milliseconds, so the overnight heart rate can be found later
+    startMs: epochMs(r.sleepStartTimestampGMT), endMs: epochMs(r.sleepEndTimestampGMT),
     respiration: num(pick(r, ["averageRespirationValue", "avgRespiration", "averageRespiration"])),
   };
 }
@@ -389,20 +397,49 @@ export function readWeight(raw) {
   return { date: dateOf(r), weightKg: g == null ? null : g > 400 ? Math.round(g) / 1000 : g };
 }
 
-/* One night in full. Field names here are NOT confirmed against a real response from this
-   API: the likeliest places are tried in turn, and the diagnostic table in the app lists what
-   actually came back so a wrong guess is a one-line fix. A resting heart rate outside 25-110
-   is rejected, because a stray 0 or an id saved as a heart rate would be worse than a gap. */
-export function readSleepDetail(raw) {
-  const dto = isObj(raw?.dailySleepDTO) ? raw.dailySleepDTO : {};
-  const sp = isObj(raw?.wellnessSpO2SleepSummaryDTO) ? raw.wellnessSpO2SleepSummaryDTO : {};
+/* The lowest average heart rate over any `windowMs` stretch of the samples: Garmin's own idea of a
+   resting heart rate is the lowest 30-minute average, and when the day's figure is not supplied this
+   reproduces it from the samples. A stretch needs enough readings to mean something (a watch that
+   was off the wrist for twenty minutes would otherwise report a "resting" rate from three samples). */
+export function lowestAverage(points, windowMs = 30 * 60000, minSamples = 8) {
+  const pts = points.filter((p) => p && p[0] != null && p[1] != null && p[1] >= 25 && p[1] <= 220).sort((a, b) => a[0] - b[0]);
+  let best = null, hi = 0, sum = 0, lo = 0;
+  for (hi = 0; hi < pts.length; hi++) {
+    sum += pts[hi][1];
+    while (pts[hi][0] - pts[lo][0] >= windowMs) { sum -= pts[lo][1]; lo++; }
+    const n = hi - lo + 1;
+    // the stretch must really span most of the window, not be a handful of samples bunched together
+    if (n >= minSamples && pts[hi][0] - pts[lo][0] >= windowMs * 0.6) { const mean = sum / n; if (best == null || mean < best) best = mean; }
+  }
+  return best;
+}
+
+/* One day of heart rate. Two routes to a resting figure, in order: Garmin's own field if it holds a
+   value, otherwise the lowest 30-minute average inside the sleep window (or across the day if the
+   window is unknown). Names are NOT yet confirmed against a real response from this API; the
+   diagnostic in the app lists what actually arrives, so a wrong guess is a one-line fix. A resting
+   rate outside 25-110 is rejected: a stray 0 saved as a heart rate would be worse than a gap. */
+export function readHeartRate(raw, win = {}) {
   const first = (...vals) => { for (const v of vals) { const n = num(v); if (n != null) return n; } return null; };
-  const rhr = first(raw?.restingHeartRate, dto.restingHeartRate, raw?.sleepSummary?.restingHeartRate, raw?.restingHeartRateInBeatsPerMinute);
-  const spo2 = first(sp.averageSPO2, sp.averageSpO2, dto.averageSpO2Value, raw?.averageSpO2Value);
+  const plausible = (n) => (n != null && n >= 25 && n <= 110 ? Math.round(n * 10) / 10 : null);
+
+  let tsIdx = 0, hrIdx = 1;
+  for (const d of Array.isArray(raw?.heartRateValueDescriptors) ? raw.heartRateValueDescriptors : []) {
+    const key = String(d?.key || "").toLowerCase(), idx = num(d?.index);
+    if (idx == null) continue;
+    if (key === "timestamp") tsIdx = idx; else if (key.includes("heart")) hrIdx = idx;
+  }
+  const all = (Array.isArray(raw?.heartRateValues) ? raw.heartRateValues : [])
+    .map((p) => (Array.isArray(p) ? [num(p[tsIdx]), num(p[hrIdx])] : null)).filter(Boolean);
+  const inWindow = win.start != null && win.end != null ? all.filter((p) => p[0] != null && p[0] >= win.start && p[0] <= win.end) : null;
+
+  const direct = plausible(first(raw?.restingHeartRate, raw?.restingHeartRateInBeatsPerMinute));
+  const computed = plausible(lowestAverage(inWindow && inWindow.length >= 8 ? inWindow : all));
   return {
-    date: raw?.__date ?? (dto.calendarDate ? String(dto.calendarDate).slice(0, 10) : null),
-    restingHr: rhr != null && rhr >= 25 && rhr <= 110 ? Math.round(rhr * 10) / 10 : null,
-    spo2: spo2 != null && spo2 >= 50 && spo2 <= 100 ? Math.round(spo2 * 10) / 10 : null,
+    date: raw?.__date ?? (raw?.calendarDate ? String(raw.calendarDate).slice(0, 10) : null),
+    restingHr: direct ?? computed,
+    source: direct != null ? "garmin" : computed != null ? (inWindow && inWindow.length >= 8 ? "computed overnight" : "computed all day") : null,
+    samples: all.length,
   };
 }
 

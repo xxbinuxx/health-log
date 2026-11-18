@@ -12,6 +12,10 @@ import {
 } from "./scores.js";
 
 const MARATHON_MI = 26.2;
+/* The distances people write as 26.2 and 13.1 are 26.2188 and 13.1094. Over a marathon the shortcut is
+   worth fifteen seconds, and it is why Hal's own example (a 4:00 marathon is 9:09 a mile) only comes out
+   right with the exact figure. Pace is worked out with the real distance. */
+export const exactMiles = (m) => (Math.abs(m - 26.2) < 0.01 ? 26.21875 : Math.abs(m - 13.1) < 0.02 ? 13.109375 : m);
 
 /* What kind of race, and what that implies for the shape of the training.
    peakLong is the biggest long run; bigTarget is how many of them to fit;
@@ -318,12 +322,15 @@ export function paces(goalSeconds, raceMiles = MARATHON_MI) {
   // Convert the goal to its marathon equivalent first, so the usual offsets apply
   // whether the race is a mile or fifty of them.
   const mpEquiv = riegel(goalSeconds, raceMiles, MARATHON_MI) / MARATHON_MI;
+  // Hal Higdon: long runs 30-90 s slower than race pace, so the single number used is the middle of that band.
+  // He gives no number for easy days, so those use a typical guide (see paceGuide below for the labelled ranges).
+  const base = raceMiles >= 12.5 && raceMiles <= 27 ? goalSeconds / exactMiles(raceMiles) : mpEquiv;
   return {
-    race: goalSeconds / raceMiles,
+    race: goalSeconds / exactMiles(raceMiles),
     marathon: mpEquiv,
-    easy: mpEquiv + 75,
-    long: mpEquiv + 55,
-    steady: mpEquiv + 20,
+    easy: base + 90,
+    long: base + 60,
+    steady: base + 90,                // a Wednesday "run" in his plan: comfortable, not a tempo
     tempo: mpEquiv - 15,     // roughly threshold
     interval: mpEquiv - 45,
     rep: mpEquiv - 75,       // faster than threshold, for the short stuff
@@ -592,13 +599,13 @@ export function buildPlan({ todayKey, startKey, raceDate, raceName, raceKind, go
         weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: longMi >= T.peakLong ? `Long run — ${T.peakLong}` : "Long run",
           miles: longMi, pace: P.long, flexible: true,
           note: longMi >= T.peakLong * 0.7 && T.miles >= 13
-            ? `Last ${Math.min(8, Math.round(longMi / 2.5))} ${u} at ${secsToClock(P.race)}/${u}. Practise race-day fuelling and kit.`
-            : `Steady at ${secsToClock(P.long)}/${u}.` });
+            ? `Comfortable, ${secsToClock(P.long)}/${u}. Optional 3/1: the last ${Math.max(2, Math.round(longMi / 4))} ${u} a little faster (about ${secsToClock(P.race + 20)}/${u}), still slower than race pace; Hal suggests it no more than once every three weekends. Practise race-day fuelling and kit.`
+            : `Comfortable, around ${secsToClock(P.long)}/${u}.` });
       } else if (dow === 3) {
         const room = (volumes[w] ?? from) - (longMi || 0);
         weekDays.push({ date, dow: DAY_NAMES[dow], kind: "run", title: "Medium-long",
           miles: inTaper ? 5 : Math.max(3, Math.min(Math.round(longMi * 0.4), Math.round(room * 0.35))),
-          pace: P.steady, note: `Steady, around ${secsToClock(P.steady)}/${u}. Lift afterwards if you have it in you.` });
+          pace: P.steady, note: `Comfortable, conversational. Lift afterwards if you have it in you.` });
       } else if (dow === 6 && (volumes[w] ?? from) < (longMi || 0) + 12) {
         // at low volume there is no room for an extra quality day
         weekDays.push({ date, dow: DAY_NAMES[dow], kind: "rest", title: "Rest", note: "The long run is doing the work this week." });
@@ -706,4 +713,111 @@ function assessGoalV2(fit, predicted, goalSeconds, weeks, twenties, bigJump, T, 
     }
   }
   return { verdict, notes, goalPace: goalSeconds / T.miles, predicted: predicted.seconds };
+}
+
+/* ===================================================================================
+   Pace, the way Hal Higdon sets it.
+
+   What he actually prescribes (Intermediate 2 page, and his own answer on weekday pace):
+   - long runs: "anywhere from 30 to 90 or more seconds per mile slower than their marathon pace"
+   - "pace" days: run at goal race pace (his example: a 4:00 marathon is 9:09)
+   - the last quarter of a long run may be "somewhat faster ... though still not race pace" (his
+     "3/1" run), no more than once in three weekends
+   What he deliberately does NOT prescribe:
+   - easy "run" days: "I don't like to prescribe specific paces for those easy, midweek runs" —
+     comfortable, conversational, and "some days this could be faster than race pace"
+   - speedwork: "There is no speedwork involved in the Intermediate 2 program"
+
+   So only two things here carry a number from Hal. Everything else is labelled for what it is:
+   a "guide" (a typical range, because a plain "easy" gives you nothing to run to) or an
+   "estimate" (the Tuesday intervals are your run club's, not his). The source travels with every
+   pace so the screen never presents one as the other.
+   =================================================================================== */
+
+const KM_PER_MILE = 1.609344;
+
+export function paceGuide(goalSeconds, raceMiles, { races = [], todayKey = null } = {}) {
+  if (!goalSeconds || !raceMiles) return null;
+  const race = goalSeconds / exactMiles(raceMiles);                  // seconds per mile, for THIS race
+  const higdon = raceMiles >= 12.5 && raceMiles <= 27;               // his half-marathon and marathon programmes
+  // for any other distance his "slower than race pace" rule makes no sense (a long run slower than 5K pace by 30-90 s
+  // would be a sprint), so measure from the marathon-equivalent pace instead and say it is a guide, not his rule
+  const base = higdon ? race : riegel(goalSeconds, raceMiles, MARATHON_MI) / exactMiles(MARATHON_MI);
+
+  // run-club sessions: roughly 5K to 10K effort, from your own results where you have them
+  const fromRaces = (mi) => { const b = bestFromRaces(races, mi, todayKey); return b ? b.predicted / mi : null; };
+  const p5 = fromRaces(3.107), p10 = fromRaces(6.214);
+  const basis = p5 || p10 ? "your recent races" : "your goal time";
+  const a = p5 ?? riegel(goalSeconds, raceMiles, 3.107) / 3.107;
+  const b = p10 ?? riegel(goalSeconds, raceMiles, 6.214) / 6.214;
+  const qLo = Math.min(a, b), qHi = Math.max(a, b, qLo + 15);        // never a zero-width band
+
+  return {
+    race, higdon, base, quality: { basis },
+    pace:  { lo: race, hi: race, source: "hal" },
+    long:  { lo: base + 30, hi: base + 90, source: higdon ? "hal" : "guide" },
+    threeOne: { lo: base + 10, hi: base + 30, source: higdon ? "hal" : "guide" },
+    easy:  { lo: base + 60, hi: base + 120, source: "guide" },
+    interval: { lo: qLo, hi: qHi, source: "estimate" },
+  };
+}
+
+/* Which kind of session a day is, from what it is called. Titles come from three places (the
+   generator, the chat, and by hand), so this reads the words rather than trusting one spelling. */
+export function classifySession(title = "", kind = "run") {
+  const t = String(title).toLowerCase();
+  if (kind === "rest") return "rest";
+  if (kind === "lift") return "lift";
+  if (kind === "race") return "race";
+  if (/hike|walk|snowshoe/.test(t)) return "hike";
+  if (/cross|swim|bike|cycl|\brest\b/.test(t)) return "other";
+  if (/medium|sorta|mid-?week/.test(t)) return "easy";                 // "Medium-long" is a Wednesday run, not a long run
+  if (/long/.test(t)) return "long";
+  if (/\bpace\b|race[- ]pace|marathon pace|\bmp\b|\brp\b/.test(t)) return "pace";
+  if (/interval|repeat|track|speed|hill|tempo|fartlek|run club|\d+\s*[x×]\s*\d+/.test(t)) return "quality";
+  return "easy";                                                       // easy, recovery, shake-out, strides, a plain "run"
+}
+
+const clock = (s) => secsToClock(Math.round(s));
+const to5 = (s) => Math.round(s / 5) * 5;
+/* One pace, or a band. A single prescribed pace is shown to the second; a band to the nearest five
+   seconds, because a band is itself a statement of "somewhere around here". */
+const fmtBand = (band, per = 1) =>
+  Math.round(band.lo) === Math.round(band.hi) ? clock(band.lo * per) : `${clock(to5(band.lo * per))}–${clock(to5(band.hi * per))}`;
+
+/* The pace for one planned day, in the unit asked for, with where it came from and why. */
+export function sessionPace(row, guide, unit = "mi") {
+  if (!row || !guide) return null;
+  const type = classifySession(row.title, row.kind);
+  const per = unit === "km" ? 1 / KM_PER_MILE : 1;
+  const band = { race: guide.pace, pace: guide.pace, long: guide.long, easy: guide.easy, quality: guide.interval }[type];
+  if (!band) return null;
+  const lo = band.lo * per, hi = band.hi * per;
+  const text = fmtBand(band, per);
+  const why = {
+    race: "Goal race pace, held even.",
+    pace: "Hal: a \"pace\" day is run at your goal race pace (his example: a 4:00 marathon is 9:09 a mile).",
+    long: guide.higdon
+      ? "Hal: long runs \"anywhere from 30 to 90 or more seconds per mile slower than their marathon pace\", at a pace where you can hold a conversation. He would rather you ran them too slow than too fast."
+      : "A guide, measured from your marathon-equivalent pace. Hal's long-run rule is written for the half and the marathon.",
+    easy: "Hal gives no number for easy days, on purpose: comfortable and conversational, and after a rest day it can be faster than race pace. This range is only a typical guide for your goal; let your breathing decide.",
+    quality: `Not part of Hal's Intermediate 2 plan (he says it has no speedwork); this is your run club's session. Shown as roughly 5K to 10K effort, estimated from ${guide.quality?.basis || "your goal time"}.`,
+  }[type];
+  const label = { hal: "Hal's rule", guide: "a guide, not Hal's", estimate: "my estimate, not Hal's" }[band.source];
+  return { type, source: band.source, label, lo, hi, text, short: `${band.source === "hal" ? "" : "~"}${text}`, why };
+}
+
+/* The same guidance as short text, for the chat and Ask, so they quote it instead of inventing it. */
+export function describeGuide(guide, unit = "mi") {
+  if (!guide) return null;
+  const per = unit === "km" ? 1 / KM_PER_MILE : 1, band = (b) => fmtBand(b, per).replace("–", "-");
+  return {
+    unit: `per ${unit}`,
+    race_pace: clock(guide.race * per),
+    pace_runs: `${band(guide.pace)} (Hal: run "pace" days at goal race pace)`,
+    long_runs: `${band(guide.long)} (${guide.higdon ? "Hal: 30 to 90 s slower than race pace" : "a guide"})`,
+    long_run_finish_3_1: `${band(guide.threeOne)} for the last quarter, optional, at most once every three weekends, still slower than race pace (Hal's "3/1" run)`,
+    easy_days: `conversational; Hal gives no number. A typical guide is ${band(guide.easy)}, and it can be faster after a rest day`,
+    intervals: `about ${band(guide.interval)}, estimated from ${guide.quality.basis}. NOT part of Hal's Intermediate 2 plan, which has no speedwork`,
+  };
 }

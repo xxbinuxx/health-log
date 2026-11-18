@@ -12,8 +12,8 @@
 // ("rateLimited": true), not an error, so the caller can wait and resume.
 import { admin, json, userFromRequest } from "./lib/shared.js";
 import {
-  garminReady, getToken, pullKind, pullFitnessAge, planWindows, makeGate, ENDPOINTS, RateLimited, describe,
-  readSleep, readDaily, readSteps, readStress, readHrv, readBodyBattery, readWeight, readFitnessAge,
+  garminReady, getToken, pullKind, pullFitnessAge, pullDay, planWindows, makeGate, ENDPOINTS, DETAIL, RateLimited, describe,
+  readSleepDetail, readSleep, readDaily, readSteps, readStress, readHrv, readBodyBattery, readWeight, readFitnessAge,
 } from "./lib/garmin.js";
 
 const SLEEP = "hl2:sleep", WELL = "hl2:wellness", DAYS = "hl2:days", STATE = "hl2:garminState";
@@ -78,6 +78,13 @@ function ingest(m, kind, rows) {
       m.touchS(x.date, { bodyBattery: x.bodyBatteryWake });
       m.touchW(x.date, { bodyBatteryHigh: x.bodyBatteryHigh, bodyBatteryLow: x.bodyBatteryLow });
     } else if (kind === "weight") { const x = readWeight(r); if (x.date && x.weightKg != null) m.touchW(x.date, { weightKg: x.weightKg }); }
+    else if (kind === "sleepDetail") {
+      // the figure on Garmin's own sleep screen. It replaces the all-day one the daily summary
+      // supplied, and the daily summary never writes over it afterwards (see "dailies" above)
+      const x = readSleepDetail(r); if (!x.date) continue;
+      m.touchS(x.date, { restingHr: x.restingHr });
+      m.touchW(x.date, { spo2: x.spo2 });
+    }
   }
 }
 
@@ -118,6 +125,35 @@ export async function syncOne(db, userId, { days = 14, before = 0, dry = false, 
   } catch (e) {
     if (e instanceof RateLimited) return rateLimitedAnswer({ ms: Date.now() - t0, report: {} });
     if (e.authFailed && !dry) await setKey(db, userId, STATE, { at: new Date().toISOString(), ok: false, authFailed: true, error: String(e.message) });
+    throw e;
+  } finally { clearTimeout(timer); }
+}
+
+/* The last few nights in full, one request each. Kept apart from the range pulls because there is
+   one request per night, so it is only ever asked about the most recent few. */
+export async function syncDetail(db, userId, { days = 3, dry = false, gapMs = 600, deadlineMs = 7000 } = {}) {
+  const t0 = Date.now();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), deadlineMs);
+  try {
+    const token = await getToken(ctrl.signal);
+    const gate = makeGate(gapMs);
+    const dates = Array.from({ length: Math.max(1, Math.min(7, days)) }, (_, i) => iso(Date.now() - i * 864e5));
+    const got = await Promise.all(dates.map((d) => pullDay(token, "sleepDetail", d, ctrl.signal, gate)));
+    const rateLimited = got.some((g) => g.rateLimited);
+    const rows = got.map((g) => g.row).filter(Boolean);
+    const found = rows.map(readSleepDetail).filter((x) => x.restingHr != null).length;
+    if (!dry && rows.length) {
+      const m = await loadMaps(db, userId);
+      ingest(m, "sleepDetail", rows);
+      await saveMaps(db, userId, m);
+    }
+    const sample = got.find((g) => g.fields?.length);
+    const firstError = got.find((g) => g.error)?.error || null;
+    return { kind: "sleepDetail", nights: dates.length, rows: found, status: [...new Set(got.map((g) => g.status))].join(","), ms: Date.now() - t0, dry,
+      fields: sample?.fields || [], error: found ? null : firstError, ...(rateLimited ? rateLimitedAnswer() : {}) };
+  } catch (e) {
+    if (e instanceof RateLimited) return rateLimitedAnswer({ kind: "sleepDetail", rows: 0 });
     throw e;
   } finally { clearTimeout(timer); }
 }
@@ -164,6 +200,10 @@ export async function handler(event) {
     }
 
     if (!garminReady()) return json(503, { error: "Garmin is not connected: add GARMIN_PERSONAL_API_KEY in Netlify, then deploy." });
+
+    if (q.detail === "sleep") {
+      return json(200, await syncDetail(db, user.id, { days: Number(q.days) || 3, dry: q.dry === "1" }));
+    }
 
     if (q.kind) {
       if (!/^\d{4}-\d\d-\d\d$/.test(q.from || "") || !/^\d{4}-\d\d-\d\d$/.test(q.to || "")) return json(400, { error: "from and to must be YYYY-MM-DD." });

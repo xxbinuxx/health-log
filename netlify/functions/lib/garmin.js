@@ -208,6 +208,33 @@ export async function pullKind(token, kind, from, to, signal, gate) {
     sampleKeys: rows[0] ? describe(rows[0]) : [] };
 }
 
+/* Endpoints that answer for ONE date and are far too expensive to walk across a history (a year
+   would be 365 requests), so they are kept out of ENDPOINTS and the backfill plan, and only
+   ever asked about the last few nights. */
+export const DETAIL = {
+  // the full record of one night. The range summary used for history carries no resting heart
+  // rate; this one is where Garmin Connect's own sleep screen gets its figure
+  sleepDetail: { url: (date) => `/sleep-service/sleep/dailySleep?date=${date}` },
+};
+
+export async function pullDay(token, kind, date, signal, gate) {
+  const ep = DETAIL[kind];
+  try {
+    await gate?.(signal);
+    if (signal?.aborted) return { row: null, status: 0, error: "timed out" };
+    const r = await fetch(`${BASE}${ep.url(date)}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" }, signal });
+    if (r.status === 429) return { row: null, status: 429, rateLimited: true };
+    if (r.status === 401 || r.status === 403) { const e = new Error(`${r.status}`); e.authFailed = true; throw e; }
+    if (!r.ok) return { row: null, status: r.status, error: `${r.status}` };
+    const text = await r.text();
+    const data = text ? JSON.parse(text) : null;
+    return { row: isObj(data) ? { ...data, __date: date } : null, status: r.status, fields: describe(data) };
+  } catch (e) {
+    if (e.authFailed) throw e;
+    return { row: null, status: 0, error: e.name === "AbortError" ? "timed out" : String(e.message || e) };
+  }
+}
+
 export async function pullFitnessAge(token, date, signal, gate) {
   if (signal?.aborted) return { row: null, status: 0 };
   try {
@@ -360,6 +387,23 @@ export function readWeight(raw) {
   const r = flat(raw);
   const g = num(pick(r, ["weight", "weightInGrams"])) ?? num(r.latestWeight);
   return { date: dateOf(r), weightKg: g == null ? null : g > 400 ? Math.round(g) / 1000 : g };
+}
+
+/* One night in full. Field names here are NOT confirmed against a real response from this
+   API: the likeliest places are tried in turn, and the diagnostic table in the app lists what
+   actually came back so a wrong guess is a one-line fix. A resting heart rate outside 25-110
+   is rejected, because a stray 0 or an id saved as a heart rate would be worse than a gap. */
+export function readSleepDetail(raw) {
+  const dto = isObj(raw?.dailySleepDTO) ? raw.dailySleepDTO : {};
+  const sp = isObj(raw?.wellnessSpO2SleepSummaryDTO) ? raw.wellnessSpO2SleepSummaryDTO : {};
+  const first = (...vals) => { for (const v of vals) { const n = num(v); if (n != null) return n; } return null; };
+  const rhr = first(raw?.restingHeartRate, dto.restingHeartRate, raw?.sleepSummary?.restingHeartRate, raw?.restingHeartRateInBeatsPerMinute);
+  const spo2 = first(sp.averageSPO2, sp.averageSpO2, dto.averageSpO2Value, raw?.averageSpO2Value);
+  return {
+    date: raw?.__date ?? (dto.calendarDate ? String(dto.calendarDate).slice(0, 10) : null),
+    restingHr: rhr != null && rhr >= 25 && rhr <= 110 ? Math.round(rhr * 10) / 10 : null,
+    spo2: spo2 != null && spo2 >= 50 && spo2 <= 100 ? Math.round(spo2 * 10) / 10 : null,
+  };
 }
 
 export function readFitnessAge(raw) {

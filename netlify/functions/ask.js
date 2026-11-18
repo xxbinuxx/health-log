@@ -6,7 +6,7 @@ import {
   rollup, buildIndices, lastNDays, addDays, toDayKey, mondayOf, relToMedian,
   median, avg, sum, round, toUnit, secsToClock, fmtShort,
 } from "../../scores.js";
-import { assessFitness, riegel, paces, buildPlan, raceType } from "../../plan.js";
+import { assessFitness, riegel, paces, buildPlan, raceType, paceGuide, describeGuide } from "../../plan.js";
 
 const KEYS = { doses: "hl2:doses", sleep: "hl2:sleep", sessions: "hl2:sessions", days: "hl2:days", settings: "hl2:settings", spend: "hl2:spend" };
 
@@ -112,7 +112,8 @@ export function digest(state, todayKey) {
     const T = raceType(r.kind);
     if (sec) {
       const P = paces(sec, T.miles);
-      fitness.goal_paces_if_target = Object.fromEntries(Object.entries(P).map(([k, v]) => [k, secsToClock(v)]));
+      // the paces come from Hal Higdon's rules, with each one labelled for whether it is his or a guide
+      fitness.goal_paces_if_target = describeGuide(paceGuide(sec, T.miles, { races: state.settings?.races || [], todayKey }), u);
       try {
         const built = buildPlan({ todayKey, startKey: state.settings.planStart, raceDate: r.date, raceName: r.name,
           raceKind: r.kind, goalSeconds: sec, daily, settings: s });
@@ -123,7 +124,7 @@ export function digest(state, todayKey) {
           race: r.name || T.name, distance: T.name, distance_miles: T.miles, date: r.date,
           days_out: Math.max(0, Math.round((new Date(r.date) - new Date(todayKey)) / 864e5)),
           weeks_out: Math.max(0, Math.floor((new Date(r.date) - new Date(todayKey)) / 864e5 / 7)),
-          goal_time: r.goalTime, goal_pace: secsToClock(P.race),
+          goal_time: r.goalTime, goal_pace: secsToClock(P.race * (u === "km" ? 1 / 1.609344 : 1)),
           equivalent_today: built.predicted.seconds ? secsToClock(built.predicted.seconds) : null,
           prediction_basis: built.predicted.basis,
           verdict: built.goal.verdict,
@@ -171,6 +172,7 @@ How to answer:
 - Lead with the answer, then the evidence.
 - Flag small samples (under about ten days) as shaky.
 - When the question is about fitness or capability, use predicted_race_times, typical_pace, vo2_max, weekly mileage and longest run together. Say plainly when the data is too thin to judge.
+- Paces come from goal_paces_if_target and follow Hal Higdon's marathon programme. Only two of them are his numbers: long runs (30 to 90 or more seconds per mile slower than marathon pace) and "pace" days (at goal race pace). Easy days have no number from Hal, who asks for a comfortable, conversational pace; any range given for them is a guide. Intervals are not part of his Intermediate 2 plan. Say which is which when you quote one, and never invent a pace that is not in the data.
 - When there is a race_plan, answer against it: how far out the race is, whether the training is tracking, what this week asks for, and whether the target still looks reachable.
 - Be honest when the numbers suggest a goal is unrealistic or the training is insufficient. Do not flatter.
 
